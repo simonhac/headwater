@@ -1,0 +1,9 @@
+# Copy to `.dev.vars` for local `wrangler dev`. In prod use `wrangler secret put <NAME>`.
+# Path token guarding POST /webhooks/meltwater/:token  (make it long + random)
+WEBHOOK_SHARED_SECRET=dev-secret-change-me
+# Query key guarding /inspect and /api/webhooks/*
+INSPECT_KEY=dev-inspect-change-me
+# Slack bot token (xoxb-…) with chat:write — leave blank until ready to actually post
+SLACK_BOT_TOKEN=
+# Default Slack channel id (e.g. C0123ABCD) or #channel-name for the trial feed
+SLACK_DEFAULT_CHANNEL=

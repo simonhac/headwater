@@ -32,10 +32,16 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
 
-# vercel
-.vercel
+# cloudflare / wrangler
+.wrangler/
+worker-configuration.d.ts
+
+# local persistence (file-store fallback)
+/.data
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts

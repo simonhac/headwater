@@ -1,0 +1,28 @@
+{
+  "search_name": "Key People",
+  "documents": [
+    {
+      "document_url": "https://www.theaustralian.com.au/commentary/zero-chance-nats-and-libs",
+      "document_title": "Zero chance Nats and Libs can support opposing policies",
+      "source_name": "The Australian",
+      "source_information_type": "news",
+      "source_country_code": "AU",
+      "source_reach": 480000,
+      "document_opening_text": "Take the CIS. This is an open-ended subsidy scheme for renewable energy operators whose investment returns are effectively guaranteed by taxpayers. Economist Ross Garnaut has argued the renewable rollout is inevitable, and renewable capacity keeps climbing.",
+      "document_author": "Judith Sloan",
+      "document_sentiment": "neutral",
+      "document_publish_date": "2026-07-06T09:07:20+10:00",
+      "document_matched_keywords": ["renewable", "renewable", "renewable", "Ross Garnaut"]
+    },
+    {
+      "document_url": "https://example-radio.example/morning-round",
+      "document_title": "The Morning Paper Round",
+      "source_name": "Vision Australia Radio Geelong",
+      "source_information_type": "radio",
+      "source_country_code": "AU",
+      "source_reach": 5860,
+      "document_opening_text": "A quick look at today's papers including coverage of Climate 200 and the teals.",
+      "document_publish_date": "2026-07-06T09:07:00+10:00"
+    }
+  ]
+}
