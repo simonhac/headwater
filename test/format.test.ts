@@ -181,23 +181,72 @@ describe("buildAttachment — footer", () => {
     expect(a.footer).toContain("·");
   });
 
+  it("shows a thumbs sentiment marker between the media type and the reach", () => {
+    const f = buildAttachment(mention({ sentiment: "positive" }), brief).footer!;
+    expect(f).toContain("👍");
+    expect(f.indexOf("news")).toBeLessThan(f.indexOf("👍"));
+    expect(f.indexOf("👍")).toBeLessThan(f.indexOf("480K reach"));
+    expect(buildAttachment(mention({ sentiment: "negative" }), brief).footer).toContain("👎");
+    expect(buildAttachment(mention({ sentiment: "neutral" }), brief).footer).toContain("😐");
+  });
+
   it("appends 'also matched' and 'Also in' when provided", () => {
-    const a = buildAttachment(mention(), brief, ["The Age", "SMH"], ["MPs", "Teals"]);
+    const others = [
+      { name: "The Age", url: "https://age.example/b", reach: 40000 },
+      { name: "SMH", url: "https://smh.example/c", reach: null },
+    ];
+    const a = buildAttachment(mention(), brief, others, ["MPs", "Teals"]);
     expect(a.footer).toContain("also matched MPs, Teals");
     expect(a.footer).toContain("Also in: The Age · SMH");
   });
 
+  it("replaces the single reach with '<N> outlets with <sum> combined reach' for multiple outlets", () => {
+    const others = [{ name: "The Age", url: "https://age.example/b", reach: 40000 }];
+    const a = buildAttachment(mention({ reach: 15000 }), brief, others);
+    expect(a.footer).toContain("2 outlets with 55K combined reach");
+    expect(a.footer).not.toContain("15K reach");
+  });
+
+  it("shows the outlet count with no reach when every outlet's reach is unknown", () => {
+    const others = [{ name: "The Age", url: "https://age.example/b", reach: null }];
+    const a = buildAttachment(mention({ reach: null }), brief, others);
+    expect(a.footer).toContain("2 outlets");
+    expect(a.footer).not.toContain("combined reach");
+  });
+
   it("caps 'Also in' at 8 outlets with a '+N more' suffix", () => {
-    const outlets = Array.from({ length: 10 }, (_, i) => `Outlet${i + 1}`);
+    const outlets = Array.from({ length: 10 }, (_, i) => ({ name: `Outlet${i + 1}`, url: null, reach: null }));
     const a = buildAttachment(mention(), brief, outlets);
     expect(a.footer).toContain("Outlet8");
     expect(a.footer).not.toContain("Outlet9");
     expect(a.footer).toContain("+2 more");
   });
 
-  it("omits the footer entirely when there is no date, media type, reach, or extras", () => {
+  it("falls back to a broadcast title's air-time for the footer date when publishedAt is null", () => {
     const a = buildAttachment(
-      mention({ publishedAt: null, mediaType: null, reach: null }),
+      mention({ publishedAt: null, title: "Drive with Jamie Burnett - Wed, 08 Jul 2026 08:30:58 +1000" }),
+      brief,
+    );
+    expect(a.footer).toContain("Wed, 8 Jul 2026, 8:30am AEST");
+    expect(a.footer).not.toContain("~"); // an air-time is exact, not approximate
+    expect(a.title).toBe("Drive with Jamie Burnett"); // time stripped from the title
+  });
+
+  it("falls back to the webhook-receipt time (marked '~') when there is no other date", () => {
+    const receivedAt = Date.parse("2026-07-08T07:40:10+10:00");
+    const a = buildAttachment(mention({ publishedAt: null }), brief, [], [], receivedAt);
+    expect(a.footer).toContain("Wed, 8 Jul 2026, ~7:40am AEST");
+  });
+
+  it("prefers the real publish date over the receipt fallback (no '~')", () => {
+    const a = buildAttachment(mention(), brief, [], [], Date.parse("2020-01-01T00:00:00+10:00"));
+    expect(a.footer).toContain("Wed, 8 Jul 2026, 8:30am AEST");
+    expect(a.footer).not.toContain("~");
+  });
+
+  it("omits the footer entirely when there is no date, media type, reach, sentiment, receipt, or extras", () => {
+    const a = buildAttachment(
+      mention({ publishedAt: null, mediaType: null, reach: null, sentiment: null }),
       brief,
     );
     expect(a.footer).toBeUndefined();

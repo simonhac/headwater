@@ -52,10 +52,10 @@ const outletOf = (m: NormalizedMention): Outlet => ({
   reach: m.reach,
 });
 
-/** Outlet names other than the headlined (primary) one. */
-function otherOutletNames(outlets: Outlet[], primary: NormalizedMention): string[] {
+/** Outlets other than the headlined (primary) one. */
+function otherOutlets(outlets: Outlet[], primary: NormalizedMention): Outlet[] {
   const primName = (primary.sourceName ?? "").toLowerCase();
-  return outlets.filter((o) => o.url !== primary.url && o.name.toLowerCase() !== primName).map((o) => o.name);
+  return outlets.filter((o) => o.url !== primary.url && o.name.toLowerCase() !== primName);
 }
 
 /** Closest recent broadcast story whose transcript SimHash is within the configured Hamming distance. */
@@ -81,6 +81,10 @@ export async function processEvent(
   seen: SeenStore,
   eventId: string,
   payload: unknown,
+  /** The webhook-receipt time (epoch ms) from `webhook_events.received_at`. This is the single
+   * source of truth for "now" — used for dedupe/story timestamps AND the card's footer date — so
+   * replays reproduce the original moment instead of stamping the wall-clock. Never `Date.now()`. */
+  receivedAtMs: number,
 ): Promise<ProcessSummary> {
   const postingEnabled = env.POSTING_ENABLED === "true";
   const stories = new StoryStore(env.DB);
@@ -91,7 +95,7 @@ export async function processEvent(
   let posted = 0;
   let duplicates = 0;
   let merged = 0;
-  const now = Date.now();
+  const now = receivedAtMs;
 
   for (const d of dropped) {
     results.push({
@@ -115,7 +119,7 @@ export async function processEvent(
     }
 
     const channel = brief.channel ?? env.SLACK_DEFAULT_CHANNEL ?? "";
-    const blocks = buildAttachment(mention, brief); // stored on DocResult for the /inspect preview
+    const blocks = buildAttachment(mention, brief, [], [], now); // stored on DocResult for the /inspect preview
     const base = { title: mention.title, source: mention.sourceName, url: mention.url, brief: brief.label, blocks };
     // Brief-scoped so the SAME article matched by a DIFFERENT brief isn't silently dropped as a
     // duplicate — it flows into the merge path below and is recorded as "also matched".
@@ -156,7 +160,7 @@ export async function processEvent(
       const upd = await updateSlack(env, {
         channel: existing.channel,
         ts: existing.slack_ts,
-        attachments: [buildAttachment(primary, primaryBrief, otherOutletNames(outlets, primary), briefLabels.slice(1))],
+        attachments: [buildAttachment(primary, primaryBrief, otherOutlets(outlets, primary), briefLabels.slice(1), existing.created_at)],
       });
       if (upd.ok) await stories.updateOutlets(existing.story_key, outlets, briefLabels, now);
       await seen.add(dedupeKey, mention.url ?? "", now);
@@ -170,7 +174,7 @@ export async function processEvent(
     }
 
     // --- new story: post it ---
-    const r = await postToSlack(env, buildPostPayload(mention, brief, channel));
+    const r = await postToSlack(env, buildPostPayload(mention, brief, channel, now));
     if (r.ok && r.ts) {
       if (key) {
         await stories.create({

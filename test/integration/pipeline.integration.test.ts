@@ -46,8 +46,9 @@ describe("processEvent (real D1 + mocked Slack)", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  const run = (id: string, payload: unknown) =>
-    processEvent(env, new EventLog(env.DB), new SeenStore(env.DB), id, payload);
+  const RECEIVED_AT = 1783500000000; // fixed webhook-receipt time for deterministic footer dates
+  const run = (id: string, payload: unknown, receivedAt = RECEIVED_AT) =>
+    processEvent(env, new EventLog(env.DB), new SeenStore(env.DB), id, payload, receivedAt);
 
   it("migrations applied: the tables exist", async () => {
     expect(await count("stories")).toBe(0);
@@ -93,6 +94,7 @@ describe("processEvent (real D1 + mocked Slack)", () => {
       new SeenStore(env.DB),
       "e4",
       newsPayload(),
+      RECEIVED_AT,
     );
     expect(summary.posted).toBe(0);
     expect(summary.results.some((r) => r.decision === "preview")).toBe(true);

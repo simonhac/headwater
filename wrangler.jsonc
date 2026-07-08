@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "meltwater-feed",
+  "name": "headwater",
   "main": "src/index.ts",
   "compatibility_date": "2025-11-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -19,10 +19,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "meltwater_feed",
-      // Replace with the id printed by `wrangler d1 create meltwater_feed`.
-      // Local `wrangler dev` works with this placeholder; remote deploy needs the real id.
-      "database_id": "95b1c395-de5d-4cf3-bcb1-068de9f9b99e",
+      "database_name": "headwater",
+      "database_id": "b473c950-c19b-4006-88bc-647aa992b0f7",
       "migrations_dir": "migrations"
     }
   ]

@@ -83,6 +83,23 @@ export class EventLog {
     return res.results ?? [];
   }
 
+  /**
+   * A page of events newest-first, optionally older than `beforeMs` (exclusive) — the
+   * cursor used by the /inspect "older messages" pager. Pass null for the latest page.
+   */
+  async page(beforeMs: number | null, limit = 50): Promise<WebhookEventRecord[]> {
+    const res = await this.db
+      .prepare(
+        `SELECT * FROM webhook_events
+          WHERE (?1 IS NULL OR received_at < ?1)
+          ORDER BY received_at DESC
+          LIMIT ?2`,
+      )
+      .bind(beforeMs, limit)
+      .all<WebhookEventRecord>();
+    return res.results ?? [];
+  }
+
   async get(id: string): Promise<WebhookEventRecord | null> {
     return await this.db
       .prepare(`SELECT * FROM webhook_events WHERE id = ?`)

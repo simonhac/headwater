@@ -1,13 +1,13 @@
-# "Added by MeltStreem" — where we're at
+# "Added by Headwater" — where we're at
 
 ## Symptom
 
-Every card in the Slack feed shows a small grey **"Added by MeltStreem"** footer beneath it.
+Every card in the Slack feed shows a small grey **"Added by Headwater"** footer beneath it.
 Streem's equivalent cards do **not** have this. We want ours gone too.
 
 ## What it is
 
-It is **not** something we write — we never emit that string ("MeltStreem" is just the app's
+It is **not** something we write — we never emit that string ("Headwater" is just the app's
 name). It's Slack's **automatic app-attribution label**, which Slack stamps on messages an app
 posts using the legacy **`attachments`** field.
 
@@ -19,19 +19,19 @@ triggers the attribution.
 
 Things we ruled out / confirmed empirically:
 
-- **Not a channel-membership issue.** The `@meltstreem` bot *is* a member of the channel
+- **Not a channel-membership issue.** The `@headwater` bot *is* a member of the channel
   (`/invite` returns "already in this channel"). Apps posting to channels they haven't joined get
   "Added by" too, but that's not our case.
 - **Not specific to blocks-in-attachment.** We rebuilt the card from Block-Kit-nested-in-attachment
   to a **classic attachment** (author_icon/author_name/title/fields/footer/color). The card looks
-  much better — but "Added by MeltStreem" **still appears**. So it's the *attachment*, not the
+  much better — but "Added by Headwater" **still appears**. So it's the *attachment*, not the
   particular attachment style.
 
 ## The tradeoff
 
 With our app, it's effectively **either/or**:
 
-| Choice | Colored left bar | "Added by MeltStreem" |
+| Choice | Colored left bar | "Added by Headwater" |
 |---|---|---|
 | Post as `attachments` (current) | ✅ yes | ❌ shown |
 | Post as top-level `blocks` | ❌ no | ✅ gone |

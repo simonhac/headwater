@@ -148,7 +148,11 @@ describe("format", () => {
 
   it("appends 'Also in' and 'also matched' to the footer", () => {
     const { kept } = applyFilters(parseWebhookPayload(payload), cfg);
-    const a = buildAttachment(kept[0]!.mention, kept[0]!.brief, ["The Age", "SMH"], ["MPs", "Teals"]);
+    const others = [
+      { name: "The Age", url: "https://age.example/b", reach: null },
+      { name: "SMH", url: "https://smh.example/c", reach: null },
+    ];
+    const a = buildAttachment(kept[0]!.mention, kept[0]!.brief, others, ["MPs", "Teals"]);
     expect(a.footer).toContain("Also in: The Age · SMH");
     expect(a.footer).toContain("also matched MPs, Teals");
   });
@@ -206,10 +210,8 @@ describe("date & reach formatting", () => {
     expect(fmtReach(null)).toBeNull();
   });
 
-  it("lightly cleans broadcast titles but leaves headlines alone", () => {
-    expect(cleanTitle("Patty and Ravyn - Wed, 08 Jul 2026 08:30:58 +1000")).toBe(
-      "Patty and Ravyn - Wed, 8 Jul 2026, 8:30am AEST",
-    );
+  it("strips a broadcast title's air-time (it moves to the footer) but leaves headlines alone", () => {
+    expect(cleanTitle("Patty and Ravyn - Wed, 08 Jul 2026 08:30:58 +1000")).toBe("Patty and Ravyn");
     expect(cleanTitle("Zero chance Nats and Libs can support opposing policies")).toBe(
       "Zero chance Nats and Libs can support opposing policies",
     );

@@ -25,8 +25,8 @@ app.get("/health", async (c) => {
     /* DB not migrated yet */
   }
   return c.json({
-    service: "meltwater-feed",
-    build: "classic-attachment-5", // bump on each deploy to confirm the running code
+    service: "headwater",
+    build: "headwater-2", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     configured: {
@@ -70,7 +70,7 @@ app.post("/webhooks/meltwater/:token", async (c) => {
   if (!parseError) {
     const seen = new SeenStore(c.env.DB);
     c.executionCtx.waitUntil(
-      processEvent(c.env, eventLog, seen, id, payload).catch(async (e) => {
+      processEvent(c.env, eventLog, seen, id, payload, receivedAt).catch(async (e) => {
         await eventLog.markProcessed(id, { decision: "error", error: String(e) }).catch(() => {});
       }),
     );
@@ -100,6 +100,7 @@ app.post("/admin/replay", async (c) => {
       reset: c.req.query("reset") === "1",
       purge: c.req.query("purge") === "1",
       purgeOnly: c.req.query("purgeOnly") === "1",
+      limit: Number(c.req.query("limit")) || undefined, // replay only the N most recent posted events
     });
     return c.json(result);
   } catch (e) {
@@ -112,8 +113,15 @@ app.get("/inspect", async (c) => {
   const gate = checkKey(key, c.env.INSPECT_KEY);
   if (gate === "unconfigured") return c.text("INSPECT_KEY not configured", 503);
   if (gate === "denied") return c.text("forbidden", 403);
-  const events = await new EventLog(c.env.DB).recent(50);
-  return c.html(renderInspectPage(events, `key=${encodeURIComponent(key ?? "")}`));
+  const PAGE_SIZE = 50;
+  const beforeRaw = Number(c.req.query("before"));
+  const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : null;
+  const events = await new EventLog(c.env.DB).page(before, PAGE_SIZE);
+  // A full page implies older history may exist; the cursor is the oldest row shown.
+  const olderCursor = events.length === PAGE_SIZE ? events[events.length - 1]!.received_at : null;
+  return c.html(
+    renderInspectPage(events, `key=${encodeURIComponent(key ?? "")}`, { before, olderCursor }),
+  );
 });
 
 export default app;
