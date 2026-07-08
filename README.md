@@ -1,7 +1,7 @@
-# meltwater-feed
+# Headwater
 
-A Cloudflare Worker that rebuilds a **Streem-style** media-monitoring feed in Slack from
-Meltwater's **Generic Webhook** (Smart Alerts). It receives each alert, filters to a
+**Headwater** is a Cloudflare Worker that rebuilds a **Streem-style** media-monitoring feed in Slack
+from Meltwater's **Generic Webhook** (Smart Alerts). It receives each alert, filters to a
 curated signal, reformats it into a tight Slack Block Kit message (with link-unfurling
 disabled), and posts it — replacing Meltwater's noisy built-in Slack feed.
 
@@ -55,7 +55,7 @@ Edit `src/config/feed.config.ts`. Start lenient, watch `/inspect` on real traffi
 ## Deploy to Cloudflare
 ```bash
 npx wrangler login
-npx wrangler d1 create meltwater_feed          # paste the printed database_id into wrangler.jsonc
+npx wrangler d1 create headwater               # paste the printed database_id into wrangler.jsonc
 pnpm db:migrate:remote
 
 # secrets (prod):
@@ -64,7 +64,7 @@ npx wrangler secret put INSPECT_KEY
 npx wrangler secret put SLACK_BOT_TOKEN          # xoxb-… (later)
 npx wrangler secret put SLACK_DEFAULT_CHANNEL    # e.g. C0123ABCD (later)
 
-pnpm deploy                                      # → https://meltwater-feed.<subdomain>.workers.dev
+pnpm deploy                                      # → https://headwater.<subdomain>.workers.dev
 ```
 Gate `/inspect` with **Cloudflare Access** in prod for real protection (the `?key=` is a minimal fallback).
 
@@ -74,7 +74,7 @@ point one or more **alerts** at it. Both live in the Meltwater app.
 
 ### a. Set up the Generic Webhook (the destination)
 1. **Account → Third-party Integrations → Generic Webhook → Connect.**
-2. Give it a **name** (e.g. `meltwater-feed-shac`) and paste the webhook **URL**:
+2. Give it a **name** (e.g. `headwater-shac`) and paste the webhook **URL**:
    `https://<your-host>/webhooks/meltwater/<WEBHOOK_SHARED_SECRET>`
    The path token **is** the auth — it must match the Worker's `WEBHOOK_SHARED_SECRET` secret exactly.
 3. **Add.** This only registers the destination — no mentions flow yet.
@@ -89,7 +89,7 @@ sends nothing until an alert names it as a delivery method.
    Avoid *Spike Detection* / digest types; they don't deliver each article.
 3. **+ Add search** — pick the saved search(es) to forward (up to 10 per alert).
 4. Under **Delivery method**, expand **Generic Webhook** and tick your connection
-   (e.g. `meltwater-feed-shac`). An alert can use several methods at once — leave **Email** ticked to
+   (e.g. `headwater-shac`). An alert can use several methods at once — leave **Email** ticked to
    keep the email alert too, or untick it for webhook-only.
 5. **Save.** Repeat for every alert/search you want in the feed.
 

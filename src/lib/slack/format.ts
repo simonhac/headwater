@@ -1,4 +1,5 @@
 import type { NormalizedMention } from "@/lib/meltwater/types";
+import type { Outlet } from "@/lib/story";
 import { type BriefRule, DEFAULT_BRIEF_COLOR } from "@/config/feed.config";
 import { keywordsFor } from "@/lib/filter/engine";
 import { sourceLogoUrl, mediaTypeEmoji } from "./icons";
@@ -63,11 +64,12 @@ function parseOffsetMinutes(input: string): number | null {
   return (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]));
 }
 
-function assemble(p: Record<string, string>, abbr: string): string {
+// `timePrefix` marks an approximate time (a "~" for the webhook-receipt fallback); "" otherwise.
+function assemble(p: Record<string, string>, abbr: string, timePrefix = ""): string {
   const period = (p.dayPeriod ?? "").toLowerCase().replace(/\s/g, "");
   // en-AU renders some short months in full (e.g. "July"); slice normalises every month to 3 letters.
   const month = (p.month ?? "").slice(0, 3);
-  return `${p.weekday}, ${p.day} ${month} ${p.year}, ${p.hour}:${p.minute}${period} ${abbr}`;
+  return `${p.weekday}, ${p.day} ${month} ${p.year}, ${timePrefix}${p.hour}:${p.minute}${period} ${abbr}`;
 }
 
 function partsOf(fmt: Intl.DateTimeFormat, d: Date): Record<string, string> {
@@ -94,27 +96,59 @@ export function fmtFriendly(input: string | null): string | null {
   return assemble(partsOf(UTC_FMT, shifted), offsetAbbrev(offMin));
 }
 
-/** Compact reach, e.g. 480000 → "480K reach", 5860 → "5.9K reach" (null when absent/zero). */
-export function fmtReach(n: number | null): string | null {
+/**
+ * Last-resort date for the footer: the webhook-receipt instant (epoch ms) rendered in the feed's
+ * home timezone and marked approximate with a "~" before the time — e.g. "Wed, 8 Jul 2026, ~7:40am
+ * AEST". Used only when the payload carries no publish date (Meltwater's "Every Mention" shape omits
+ * it) and the title has no broadcast air-time; the "~" flags that this is the receipt time, not the
+ * story's own timestamp. Null for a missing/invalid instant.
+ */
+export function fmtReceivedApprox(ms: number | null): string | null {
+  if (ms === null || !Number.isFinite(ms)) return null;
+  const p = partsOf(HOME_FMT, new Date(ms));
+  return assemble(p, p.timeZoneName ?? "", "~");
+}
+
+/** Compact number, e.g. 480000 → "480K", 2500000 → "2.5M", 5860 → "5.9K" (null when absent/zero). */
+export function compactReach(n: number | null): string | null {
   if (n === null || !Number.isFinite(n) || n <= 0) return null;
-  let s: string;
-  if (n >= 1_000_000) s = (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
-  else if (n >= 1_000) s = (n / 1_000).toFixed(n >= 100_000 ? 0 : 1).replace(/\.0$/, "") + "K";
-  else s = String(n);
-  return `${s} reach`;
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(n >= 100_000 ? 0 : 1).replace(/\.0$/, "") + "K";
+  return String(n);
+}
+
+/** Compact reach with suffix, e.g. 480000 → "480K reach" (null when absent/zero). */
+export function fmtReach(n: number | null): string | null {
+  const c = compactReach(n);
+  return c && `${c} reach`;
+}
+
+/** Thumbs marker for a mention's sentiment; null when unknown. */
+function sentimentEmoji(sentiment: string | null): string | null {
+  switch (sentiment) {
+    case "positive": return "👍";
+    case "negative": return "👎";
+    case "neutral": return "😐";
+    default: return null;
+  }
 }
 
 // Broadcast titles arrive as "<program> - Wed, 08 Jul 2026 08:30:58 +1000"; capture the RFC tail.
 const BROADCAST_TAIL = /\s+-\s+(\w{3},\s*\d{1,2}\s+\w{3}\s+\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*[+-]\d{4})\s*$/;
 
-/** Lightly clean a broadcast title: keep the program name, reformat a trailing air date/time. */
+/** The raw air-date tail of a broadcast title ("Wed, 08 Jul 2026 08:30:58 +1000"), or null. */
+export function broadcastAirtime(title: string | null): string | null {
+  if (!title) return null;
+  const m = BROADCAST_TAIL.exec(title);
+  return m ? m[1]! : null;
+}
+
+/** Strip a broadcast title's trailing air date/time, leaving just the program name (its time moves
+ * to the footer). Non-broadcast titles pass through unchanged. */
 export function cleanTitle(title: string | null): string | null {
   if (!title) return title;
   const m = BROADCAST_TAIL.exec(title);
-  if (!m) return title;
-  const friendly = fmtFriendly(m[1]!);
-  if (!friendly) return title;
-  return title.slice(0, m.index).trimEnd() + " - " + friendly;
+  return m ? title.slice(0, m.index).trimEnd() : title;
 }
 
 /** Left-bar colour for a brief (its own colour, else the shared default). */
@@ -125,13 +159,15 @@ export function briefColor(brief: BriefRule): string {
 /**
  * Build the Streem-style classic attachment for one mention. `otherOutlets` are additional outlets
  * that carried the same (syndicated) story; `otherBriefLabels` are the non-primary Organisation
- * Briefs that also matched it — both appended to the footer.
+ * Briefs that also matched it — both appended to the footer. `receivedAtMs` is the webhook-receipt
+ * instant, used only as an approximate ("~") footer date when the mention has no better timestamp.
  */
 export function buildAttachment(
   m: NormalizedMention,
   brief: BriefRule,
-  otherOutlets: string[] = [],
+  otherOutlets: Outlet[] = [],
   otherBriefLabels: string[] = [],
+  receivedAtMs: number | null = null,
 ): SlackAttachment {
   const kws = keywordsFor(m, brief);
   const masthead = m.sourceName ?? "Unknown source";
@@ -151,15 +187,39 @@ export function buildAttachment(
   if (m.author) fields.push({ title: "Author", value: escapeMrkdwn(m.author), short: true });
   fields.push({ title: "Organisation Brief", value: escapeMrkdwn(brief.label), short: true });
 
-  // footer: date · media type · reach (+ "also matched …" and "Also in: …"). Plain text — Slack
-  // attachment footers don't render mrkdwn, so no pills here.
-  const footerBits = [fmtFriendly(m.publishedAt), m.mediaType, fmtReach(m.reach)].filter(
-    (x): x is string => !!x,
-  );
+  // footer: date · media type · sentiment · reach (+ "also matched …" and "Also in: …"). Plain
+  // text — Slack attachment footers don't render mrkdwn, so no pills here. When the story was
+  // carried by multiple outlets, the single reach is replaced by the outlet count + summed reach.
+  let reachBit: string | null;
+  if (otherOutlets.length) {
+    const count = otherOutlets.length + 1; // + the primary (headlined) outlet
+    const total = [m.reach, ...otherOutlets.map((o) => o.reach)]
+      .filter((r): r is number => typeof r === "number" && Number.isFinite(r) && r > 0)
+      .reduce((a, b) => a + b, 0);
+    const combined = compactReach(total);
+    reachBit = combined ? `${count} outlets with ${combined} combined reach` : `${count} outlets`;
+  } else {
+    reachBit = fmtReach(m.reach);
+  }
+
+  // Footer date, best available: the mention's own publish date → a broadcast title's air-time →
+  // the webhook-receipt time (marked "~" as an approximate, secondary source).
+  const footerDate =
+    fmtFriendly(m.publishedAt) ??
+    fmtFriendly(broadcastAirtime(m.title)) ??
+    fmtReceivedApprox(receivedAtMs);
+
+  const footerBits = [
+    footerDate,
+    m.mediaType,
+    sentimentEmoji(m.sentiment),
+    reachBit,
+  ].filter((x): x is string => !!x);
   if (otherBriefLabels.length) footerBits.push(`also matched ${otherBriefLabels.join(", ")}`);
   if (otherOutlets.length) {
-    const shown = otherOutlets.slice(0, 8).join(" · ");
-    const more = otherOutlets.length > 8 ? ` +${otherOutlets.length - 8} more` : "";
+    const names = otherOutlets.map((o) => o.name);
+    const shown = names.slice(0, 8).join(" · ");
+    const more = names.length > 8 ? ` +${names.length - 8} more` : "";
     footerBits.push(`Also in: ${shown}${more}`);
   }
 
@@ -179,10 +239,15 @@ export function buildAttachment(
   return att;
 }
 
-export function buildPostPayload(m: NormalizedMention, brief: BriefRule, channel: string): SlackPostPayload {
+export function buildPostPayload(
+  m: NormalizedMention,
+  brief: BriefRule,
+  channel: string,
+  receivedAtMs: number | null = null,
+): SlackPostPayload {
   return {
     channel,
-    attachments: [buildAttachment(m, brief)],
+    attachments: [buildAttachment(m, brief, [], [], receivedAtMs)],
     unfurl_links: false,
     unfurl_media: false,
   };

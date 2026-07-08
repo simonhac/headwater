@@ -1,13 +1,15 @@
 import type { WebhookEventRecord } from "@/lib/store/eventLog";
 import type { ProcessSummary, DocResult } from "@/lib/process";
+import type { SlackAttachment } from "@/lib/slack/format";
+import { INSPECT_CSS } from "./inspect.styles";
+import { escHtml, renderCardBody, decisionPill } from "./card";
 
-function esc(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function fmtTime(ms: number): string {
-  const d = new Date(ms);
-  return Number.isNaN(d.getTime()) ? String(ms) : d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
+/** Paging context for the /inspect stream (computed by the route). */
+export interface InspectPaging {
+  /** The `?before` cursor this page was loaded with (null = latest page). */
+  before: number | null;
+  /** received_at to load the next older page, or null when there's no older page. */
+  olderCursor: number | null;
 }
 
 function pretty(json: string | null): string {
@@ -19,33 +21,64 @@ function pretty(json: string | null): string {
   }
 }
 
-const BADGE: Record<string, string> = {
-  posted: "#16794e",
-  merged: "#1f6f8a",
-  preview: "#8a6d00",
-  dropped: "#8a1f1f",
-  duplicate: "#555",
-  logged: "#555",
-  error: "#8a1f1f",
-};
+// Day label + wall-clock time in the feed's home timezone (matches format.ts HOME_FMT).
+const DAY_FMT = new Intl.DateTimeFormat("en-AU", { weekday: "long", day: "numeric", month: "long", timeZone: "Australia/Sydney" });
+const TIME_FMT = new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Australia/Sydney" });
 
-function badge(text: string): string {
-  const color = BADGE[text] ?? "#555";
-  return `<span class="badge" style="background:${color}">${esc(text)}</span>`;
+function dayLabel(ms: number): string {
+  return DAY_FMT.format(new Date(ms));
+}
+function dividerText(ms: number, now: number): string {
+  const label = dayLabel(ms);
+  if (label === dayLabel(now)) return "Today";
+  if (label === dayLabel(now - 86_400_000)) return "Yesterday";
+  return label;
+}
+function fmtTime(ms: number): string {
+  return Number.isFinite(ms) ? TIME_FMT.format(new Date(ms)) : String(ms);
 }
 
-function renderDocResult(r: DocResult): string {
-  const bits = [
-    badge(r.decision),
-    r.source ? `<b>${esc(r.source)}</b>` : "",
-    r.title ? esc(r.title) : "(no title)",
-    r.brief ? `<span class="muted">· ${esc(r.brief)}</span>` : "",
-    r.reason ? `<span class="reason">${esc(r.reason)}</span>` : "",
-  ].filter(Boolean);
-  const blocks = r.blocks
-    ? `<details><summary>Attachment</summary><pre>${esc(JSON.stringify(r.blocks, null, 2))}</pre></details>`
-    : "";
-  return `<div class="doc">${bits.join(" ")}${blocks}</div>`;
+function statLine(s: ProcessSummary): string {
+  return `${s.total} docs · ${s.posted} posted · ${s.dropped} dropped · ${s.duplicates} dup · ${s.merged} merged`;
+}
+
+/** The inline debug panel (revealed on click): decision, brief, ts, time, stats, reason + raw. */
+function dbgPanel(ev: WebhookEventRecord, summary: ProcessSummary | null, r: DocResult | null): string {
+  const bits: string[] = [];
+  if (r) bits.push(decisionPill(r.decision));
+  else bits.push(decisionPill(ev.decision));
+  if (r?.brief) bits.push(`<span>brief: ${escHtml(r.brief)}</span>`);
+  if (r?.slackTs) bits.push(`<span>ts ${escHtml(r.slackTs)}</span>`);
+  bits.push(`<span class="dbg-time">${escHtml(fmtTime(ev.received_at))}</span>`);
+  if (summary) bits.push(`<span>${escHtml(statLine(summary))}</span>`);
+  if (ev.error) bits.push(`<span class="dbg-reason">${escHtml(ev.error)}</span>`);
+  const reason = r?.reason ? `<div class="dbg-reason">${escHtml(r.reason)}</div>` : "";
+  return `<div class="dbg" hidden>
+    <div class="dbg-meta">${bits.join("")}</div>
+    ${reason}
+    <details><summary>Raw payload</summary><pre>${escHtml(pretty(ev.raw_json))}</pre></details>
+  </div>`;
+}
+
+function renderCard(ev: WebhookEventRecord, summary: ProcessSummary, r: DocResult): string {
+  const att = r.blocks as SlackAttachment;
+  const bar = escHtml(att.color || "#868e96");
+  return `<article class="att" style="--bar:${bar}">${renderCardBody(att)}${dbgPanel(ev, summary, r)}</article>`;
+}
+
+function renderDroppedRow(ev: WebhookEventRecord, summary: ProcessSummary, r: DocResult): string {
+  const outlet = r.source ? `<span class="drop-outlet">${escHtml(r.source)}</span>` : "";
+  const title = `<span class="drop-title">${escHtml(r.title ?? "(no title)")}</span>`;
+  const reason = r.reason ? `<span class="drop-reason">${escHtml(r.reason)}</span>` : "";
+  return `<div class="drop-wrap"><div class="drop">${outlet}${title}${reason}</div>${dbgPanel(ev, summary, r)}</div>`;
+}
+
+/** A muted placeholder row for events with no renderable documents (unparsed / empty / error). */
+function renderBareRow(ev: WebhookEventRecord, summary: ProcessSummary | null): string {
+  const label = summary ? "no documents" : "unparsed event";
+  const src = ev.source ? `<span class="drop-outlet">${escHtml(ev.source)}</span>` : "";
+  const err = ev.error ? `<span class="drop-reason">${escHtml(ev.error)}</span>` : "";
+  return `<div class="drop-wrap"><div class="drop">${src}<span class="drop-title">${label}</span>${err}</div>${dbgPanel(ev, summary, null)}</div>`;
 }
 
 function renderEvent(ev: WebhookEventRecord): string {
@@ -55,49 +88,76 @@ function renderEvent(ev: WebhookEventRecord): string {
   } catch {
     summary = null;
   }
-  const docs = summary?.results?.map(renderDocResult).join("") ?? '<div class="muted">not parsed yet</div>';
-  const stat = summary
-    ? `${summary.total} docs · ${summary.posted} posted · ${summary.dropped} dropped · ${summary.duplicates} dup`
-    : "";
-  return `
-  <div class="event">
-    <div class="ev-head">
-      ${badge(ev.decision)}
-      <span class="time">${esc(fmtTime(ev.received_at))}</span>
-      ${ev.source ? `<b>${esc(ev.source)}</b>` : ""}
-      <span class="muted">${esc(stat)}</span>
-      ${ev.error ? `<span class="reason">${esc(ev.error)}</span>` : ""}
-    </div>
-    <div class="docs">${docs}</div>
-    <details><summary>Raw payload</summary><pre>${esc(pretty(ev.raw_json))}</pre></details>
-  </div>`;
+  if (!summary) return renderBareRow(ev, null);
+
+  const kept = summary.results.filter((r) => r.blocks);
+  const dropped = summary.results.filter((r) => !r.blocks);
+  if (!kept.length && !dropped.length) return renderBareRow(ev, summary);
+
+  const cards = kept.map((r) => renderCard(ev, summary!, r)).join("");
+  const drops = dropped.map((r) => renderDroppedRow(ev, summary!, r)).join("");
+  return cards + drops;
 }
 
-export function renderInspectPage(events: WebhookEventRecord[], keyQS: string): string {
-  const rows = events.length
-    ? events.map(renderEvent).join("")
-    : '<p class="muted">No webhook events yet. Point a Meltwater Generic Webhook at <code>/webhooks/meltwater/&lt;secret&gt;</code>.</p>';
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Meltwater feed — inspect</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; }
-  h1 { font-size: 18px; }
-  .event { border: 1px solid #8883; border-radius: 10px; padding: 12px 14px; margin: 12px 0; }
-  .ev-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .docs { margin: 8px 0; }
-  .doc { padding: 6px 0; border-top: 1px solid #8882; }
-  .badge { color: #fff; border-radius: 6px; padding: 1px 7px; font-size: 12px; font-weight: 600; }
-  .muted { color: #8889; }
-  .time { color: #8889; font-variant-numeric: tabular-nums; }
-  .reason { color: #b05; font-size: 12px; }
-  details { margin-top: 6px; }
-  summary { cursor: pointer; color: #4581e6; font-size: 12px; }
-  pre { background: #8881; padding: 10px; border-radius: 8px; overflow: auto; font-size: 12px; }
-  a { color: #4581e6; }
-</style></head><body>
-<h1>Meltwater feed — recent webhook events</h1>
-<p><a href="/inspect?${esc(keyQS)}">↻ refresh</a> · <a href="/api/webhooks/recent?${esc(keyQS)}">raw JSON</a></p>
-${rows}
+/** Insert day-divider rows between events whose day (Australia/Sydney) differs. */
+function renderStream(ascending: WebhookEventRecord[], now: number): string {
+  let out = "";
+  let lastDay = "";
+  for (const ev of ascending) {
+    const day = dayLabel(ev.received_at);
+    if (day !== lastDay) {
+      out += `<div class="day"><span>${escHtml(dividerText(ev.received_at, now))}</span></div>`;
+      lastDay = day;
+    }
+    out += renderEvent(ev);
+  }
+  return out;
+}
+
+function renderPager(keyQS: string, paging: InspectPaging): string {
+  const q = escHtml(keyQS);
+  const links: string[] = [];
+  if (paging.olderCursor !== null) {
+    links.push(`<a href="/inspect?${q}&amp;before=${paging.olderCursor}">⌃ Older messages</a>`);
+  }
+  if (paging.before !== null) {
+    links.push(`<a href="/inspect?${q}">Latest ›</a>`);
+  }
+  return links.length ? `<div class="pager">${links.join("")}</div>` : "";
+}
+
+export function renderInspectPage(events: WebhookEventRecord[], keyQS: string, paging: InspectPaging): string {
+  const now = Date.now();
+  // `events` arrive newest-first; display oldest→newest (Slack-style, newest at the bottom).
+  const ascending = [...events].reverse();
+  const stream = events.length
+    ? renderPager(keyQS, paging) + renderStream(ascending, now)
+    : `<p class="empty">No webhook events yet. Point a Meltwater Generic Webhook at <code>/webhooks/meltwater/&lt;secret&gt;</code>.</p>`;
+  // Auto-scroll to the newest card only on the latest page (not while paging through history).
+  const autoscroll = paging.before === null && events.length > 0 ? "1" : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Headwater — inspect</title>
+<style>${INSPECT_CSS}</style></head><body>
+<header class="topbar">
+  <h1>Headwater — webhook feed</h1>
+  <nav><a href="/inspect?${escHtml(keyQS)}">↻ refresh</a> · <a href="/api/webhooks/recent?${escHtml(keyQS)}">raw JSON</a></nav>
+</header>
+<main class="stream">${stream}</main>
+<script>
+(function(){
+  document.addEventListener("click", function(e){
+    if (e.target.closest("a")) return;      // let links navigate
+    if (e.target.closest(".dbg")) return;   // don't collapse when using the debug panel
+    var box = e.target.closest(".att, .drop-wrap");
+    if (!box) return;
+    var dbg = box.querySelector(".dbg");
+    if (!dbg) return;
+    dbg.hidden = !dbg.hidden;
+    box.setAttribute("aria-expanded", String(!dbg.hidden));
+  });
+  if (${autoscroll ? "true" : "false"}) window.scrollTo(0, document.documentElement.scrollHeight);
+})();
+</script>
 </body></html>`;
 }

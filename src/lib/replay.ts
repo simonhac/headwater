@@ -57,7 +57,7 @@ async function purgeBotMessages(env: Env, channel: string): Promise<{ deleted: n
  */
 export async function replayArchivedEvents(
   env: Env,
-  opts: { reset?: boolean; purge?: boolean; purgeOnly?: boolean } = {},
+  opts: { reset?: boolean; purge?: boolean; purgeOnly?: boolean; limit?: number } = {},
 ): Promise<ReplayResult> {
   const db = env.DB;
   const res: ReplayResult = { reset: !!opts.reset, purged: 0, events: 0, skipped: 0, posted: 0, merged: 0, errors: 0 };
@@ -74,9 +74,19 @@ export async function replayArchivedEvents(
     await db.prepare("DELETE FROM stories").run();
   }
 
+  // Full backfill: every event oldest-first (so syndication/near-dup merging recomputes in order).
+  // With `limit`: just the N most recent *posted* real events — still processed oldest-first — for a
+  // small spot-check regen after a wipe.
+  type Row = { id: string; raw_json: string; received_at: number };
   const rows =
-    (await db.prepare("SELECT id, raw_json FROM webhook_events ORDER BY received_at ASC").all<{ id: string; raw_json: string }>())
-      .results ?? [];
+    opts.limit && opts.limit > 0
+      ? (
+          (await db
+            .prepare("SELECT id, raw_json, received_at FROM webhook_events WHERE posted = 1 ORDER BY received_at DESC LIMIT ?")
+            .bind(opts.limit)
+            .all<Row>()).results ?? []
+        ).reverse()
+      : (await db.prepare("SELECT id, raw_json, received_at FROM webhook_events ORDER BY received_at ASC").all<Row>()).results ?? [];
 
   const eventLog = new EventLog(db);
   const seen = new SeenStore(db);
@@ -95,7 +105,7 @@ export async function replayArchivedEvents(
       continue;
     }
     try {
-      const summary = await processEvent(env, eventLog, seen, r.id, payload);
+      const summary = await processEvent(env, eventLog, seen, r.id, payload, r.received_at);
       res.events++;
       res.posted += summary.posted;
       res.merged += summary.merged;
