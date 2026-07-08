@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import { parseWebhookPayload } from "@/lib/meltwater/parse";
 import { applyFilters } from "@/lib/filter/engine";
 import { highlightKeywordsAsCode, buildMentionsLine, truncate, escapeMrkdwn } from "@/lib/slack/highlight";
-import { buildBlocks } from "@/lib/slack/format";
-import { normalizeTitle, storyKey, addOutlet, type Outlet } from "@/lib/story";
-import type { FeedConfig } from "@/config/feed.config";
+import { buildAttachment, buildPostPayload, briefColor, fmtFriendly, fmtReach, cleanTitle } from "@/lib/slack/format";
+import { sourceLogoUrl, faviconUrl, mediaTypeEmoji } from "@/lib/slack/icons";
+import { normalizeTitle, storyKey, addOutlet, addBriefLabel, type Outlet } from "@/lib/story";
+import { simhash64, hammingDistance, tokenize, shingles } from "@/lib/simhash";
+import { DEFAULT_BRIEF_COLOR, type FeedConfig } from "@/config/feed.config";
 
 const cfg: FeedConfig = {
   minSourceReach: 100000,
@@ -14,6 +16,7 @@ const cfg: FeedConfig = {
   sourceBlocklist: [],
   allowedCountryCodes: ["AU"],
   requireMatchedKeyword: false,
+  nearDuplicate: { enabled: true, windowHours: 6, maxHammingDistance: 3, shingleSize: 3, mediaTypes: ["radio", "tv"] },
   defaultBriefLabel: "Media",
   briefs: [{ id: "kp", label: "Key People", matchNames: ["key people"], keywords: ["renewable", "Ross Garnaut"] }],
 };
@@ -52,6 +55,37 @@ describe("parse", () => {
     expect(m[0]!.briefName).toBe("Key People");
     expect(m[0]!.matchedKeywords).toContain("Ross Garnaut");
   });
+
+  // Sanitized shape of a real Meltwater "Every Mention" webhook (fake tokens, trimmed text).
+  const everyMention = {
+    id: "abc123",
+    type: "Every Mention",
+    providerType: "tveyes_radio",
+    title: "Some Program - Wed, 08 Jul 2026 08:04:25 +1000",
+    statusLine: "🔊 55.9k Reach — 😐 Neutral Sentiment",
+    source: "MPs",
+    keywords: "MP, Kate Chaney",
+    authorName: "Jim O'Rourke",
+    image: "https://example.test/img.jpg",
+    text: "Independent MP Kate Chaney is calling on the government.",
+    links: {
+      article: "https://t.notifications.example/v2/x?m=webhook&u=https%253A%252F%252Fwww.heraldsun.com.au%252Fa",
+      source: "https://t.notifications.example/v2/x?m=webhook&u=https%253A%252F%252Fwww.heraldsun.com.au%252F",
+    },
+  };
+
+  it("maps the 'Every Mention' shape: masthead from domain, byline, medium, reach", () => {
+    const [m] = parseWebhookPayload(everyMention);
+    expect(m!.sourceName).toBe("Herald Sun"); // masthead from heraldsun.com.au (authorName is a byline)
+    expect(m!.author).toBe("Jim O'Rourke"); // byline moved to Author
+    expect(m!.mediaType).toBe("radio"); // tveyes_radio → radio
+    expect(m!.reach).toBe(55900); // parsed from statusLine
+    expect(m!.sentiment).toBe("neutral");
+    expect(m!.briefName).toBe("MPs"); // `source` = brief
+    expect(m!.matchedKeywords).toEqual(["MP", "Kate Chaney"]);
+    expect(m!.url).toContain("t.notifications.example"); // licensed/tracking link kept
+    expect(m!.outletUrl).toBe("https://www.heraldsun.com.au/");
+  });
 });
 
 describe("filter", () => {
@@ -89,22 +123,124 @@ describe("highlight", () => {
 });
 
 describe("format", () => {
-  it("produces the Streem block structure with unfurl-free headline + brief footer", () => {
+  it("builds a classic attachment: logo+masthead, headline link, Author|Brief fields", () => {
     const { kept } = applyFilters(parseWebhookPayload(payload), cfg);
-    const blocks = buildBlocks(kept[0]!.mention, kept[0]!.brief) as any[];
-    expect(blocks[0].type).toBe("context");
-    expect(blocks[1].text.text).toContain("<https://x.example/a|");
-    expect(blocks[1].text.text).toContain("*"); // bold headline
-    expect(JSON.stringify(blocks)).toContain("Organisation Brief");
-    expect(JSON.stringify(blocks)).toContain("Key People");
+    const a = buildAttachment(kept[0]!.mention, kept[0]!.brief);
+    expect(a.author_name).toBe("The Australian"); // masthead
+    expect(a.author_icon).toBeTruthy(); // logo favicon
+    expect(a.title).toBe("Big renewable news");
+    expect(a.title_link).toBe("https://x.example/a");
+    expect(a.fields?.some((f) => f.title === "Author" && f.value === "Judith Sloan")).toBe(true);
+    expect(a.fields?.some((f) => f.title === "Organisation Brief" && f.value === "Key People")).toBe(true);
+    expect(a.mrkdwn_in).toContain("text");
   });
 
-  it("appends an 'Also in' line when other outlets are supplied", () => {
+  it("builds a payload with no top-level text and a brief-coloured attachment", () => {
     const { kept } = applyFilters(parseWebhookPayload(payload), cfg);
-    const blocks = buildBlocks(kept[0]!.mention, kept[0]!.brief, ["The Age", "SMH"]) as any[];
-    const last = blocks[blocks.length - 1];
-    expect(last.type).toBe("context");
-    expect(last.elements[0].text).toContain("Also in: The Age  ·  SMH");
+    const coloured = { ...kept[0]!.brief, color: "#123456" };
+    const p = buildPostPayload(kept[0]!.mention, coloured, "C123") as any;
+    expect(p.channel).toBe("C123");
+    expect(p.text).toBeUndefined(); // no plain line above the card
+    expect(p.attachments).toHaveLength(1);
+    expect(p.attachments[0].color).toBe("#123456");
+    expect(p.attachments[0].fallback).toContain("The Australian");
+  });
+
+  it("appends 'Also in' and 'also matched' to the footer", () => {
+    const { kept } = applyFilters(parseWebhookPayload(payload), cfg);
+    const a = buildAttachment(kept[0]!.mention, kept[0]!.brief, ["The Age", "SMH"], ["MPs", "Teals"]);
+    expect(a.footer).toContain("Also in: The Age · SMH");
+    expect(a.footer).toContain("also matched MPs, Teals");
+  });
+});
+
+describe("near-duplicate (SimHash)", () => {
+  const A =
+    "unable to make calls or use data on their mobile phones or other devices. Telstra says they are investigating the issue. Federal independent MP Andrew Wilkie has slammed the state government after they approved a new gambling license to online bookmaker better. Mr Wilkie saying the movie is rolling";
+  const B =
+    "unable to make calls or use data on their mobile phones or other devices. Telstra says they are investigating the issue. Federal Independent MP Andrew Wilkie. has slammed the state government after they approved a new gambling license to online bookmaker Better, Mr Wilkie saying the movie is rolling";
+  const C =
+    "The Prime Minister today announced a new renewable energy target as part of the government climate policy agenda for the coming decade ahead of the next election";
+
+  it("gives the same segment a tiny distance and different segments a large one", () => {
+    const a = simhash64(A)!;
+    const b = simhash64(B)!;
+    const c = simhash64(C)!;
+    expect(hammingDistance(a, a)).toBe(0);
+    expect(hammingDistance(a, b)).toBeLessThanOrEqual(3); // same clip, different ASR → merges
+    expect(hammingDistance(a, c)).toBeGreaterThan(10); // unrelated → never merges
+  });
+
+  it("returns null for empty/too-short text", () => {
+    expect(simhash64(null)).toBeNull();
+    expect(simhash64("two words")).toBeNull();
+  });
+
+  it("tokenizes and shingles", () => {
+    expect(tokenize("Hello, World! 42")).toEqual(["hello", "world", "42"]);
+    expect(shingles(["a", "b", "c", "d"], 3)).toEqual(["a b c", "b c d"]);
+    expect(shingles(["a", "b"], 3)).toEqual(["a", "b"]); // shorter than w → raw tokens
+  });
+
+  it("addBriefLabel de-dupes case-insensitively, primary first", () => {
+    expect(addBriefLabel(["Climate 200"], "MPs")).toEqual(["Climate 200", "MPs"]);
+    expect(addBriefLabel(["Climate 200", "MPs"], "climate 200")).toEqual(["Climate 200", "MPs"]);
+  });
+});
+
+describe("date & reach formatting", () => {
+  it("uses the timestamp's own offset for the abbreviation", () => {
+    expect(fmtFriendly("2026-07-08T08:30:58+10:00")).toBe("Wed, 8 Jul 2026, 8:30am AEST");
+    expect(fmtFriendly("2026-01-15T14:05:00+11:00")).toBe("Thu, 15 Jan 2026, 2:05pm AEDT");
+    expect(fmtFriendly("2026-07-08T09:00:00+08:00")).toBe("Wed, 8 Jul 2026, 9:00am AWST");
+    expect(fmtFriendly("2026-07-08T09:00:00+09:30")).toBe("Wed, 8 Jul 2026, 9:00am ACST");
+    expect(fmtFriendly(null)).toBeNull();
+    expect(fmtFriendly("not a date")).toBeNull();
+  });
+
+  it("formats reach compactly", () => {
+    expect(fmtReach(480000)).toBe("480K reach");
+    expect(fmtReach(5860)).toBe("5.9K reach");
+    expect(fmtReach(1_200_000)).toBe("1.2M reach");
+    expect(fmtReach(0)).toBeNull();
+    expect(fmtReach(null)).toBeNull();
+  });
+
+  it("lightly cleans broadcast titles but leaves headlines alone", () => {
+    expect(cleanTitle("Patty and Ravyn - Wed, 08 Jul 2026 08:30:58 +1000")).toBe(
+      "Patty and Ravyn - Wed, 8 Jul 2026, 8:30am AEST",
+    );
+    expect(cleanTitle("Zero chance Nats and Libs can support opposing policies")).toBe(
+      "Zero chance Nats and Libs can support opposing policies",
+    );
+    expect(cleanTitle(null)).toBeNull();
+  });
+});
+
+describe("icons", () => {
+  it("resolves per-outlet logos: curated first, then the article domain", () => {
+    expect(sourceLogoUrl("The Australian", null)).toContain("theaustralian.com.au");
+    expect(sourceLogoUrl("ABC Esperance", null)).toContain("abc.net.au");
+    expect(sourceLogoUrl("Random Blog", "https://www.randomblog.example/a")).toContain("randomblog.example");
+    expect(sourceLogoUrl(null, null)).toBeNull();
+  });
+
+  it("derives favicons from a URL domain, safely", () => {
+    expect(faviconUrl("https://www.example.com/path")).toBe("https://www.google.com/s2/favicons?sz=64&domain=example.com");
+    expect(faviconUrl("not a url")).toBeNull();
+    expect(faviconUrl(null)).toBeNull();
+  });
+
+  it("maps media types to emoji (online before news)", () => {
+    expect(mediaTypeEmoji("radio")).toBe("📻");
+    expect(mediaTypeEmoji("online_news")).toBe("🌐");
+    expect(mediaTypeEmoji("news")).toBe("📰");
+    expect(mediaTypeEmoji(null)).toBe("📰");
+  });
+
+  it("briefColor falls back to the default", () => {
+    expect(briefColor({ id: "x", label: "X", keywords: [], color: "#abcdef" })).toBe("#abcdef");
+    expect(briefColor({ id: "x", label: "X", keywords: [] })).toBe(DEFAULT_BRIEF_COLOR);
   });
 });
 

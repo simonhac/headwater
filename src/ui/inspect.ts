@@ -43,7 +43,7 @@ function renderDocResult(r: DocResult): string {
     r.reason ? `<span class="reason">${esc(r.reason)}</span>` : "",
   ].filter(Boolean);
   const blocks = r.blocks
-    ? `<details><summary>Block Kit</summary><pre>${esc(JSON.stringify(r.blocks, null, 2))}</pre></details>`
+    ? `<details><summary>Attachment</summary><pre>${esc(JSON.stringify(r.blocks, null, 2))}</pre></details>`
     : "";
   return `<div class="doc">${bits.join(" ")}${blocks}</div>`;
 }

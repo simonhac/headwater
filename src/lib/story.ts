@@ -13,6 +13,11 @@ export interface StoryRow {
   brief_label: string | null;
   primary_mention_json: string;
   outlets_json: string;
+  /** Every Organisation Brief that matched this story, primary first (JSON string[]). */
+  brief_labels_json: string;
+  /** Decimal string of the transcript's 64-bit SimHash (null for non-broadcast / too-short text). */
+  simhash: string | null;
+  media_type: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -38,6 +43,12 @@ export function addOutlet(outlets: Outlet[], o: Outlet): Outlet[] {
   return dup ? outlets : [...outlets, o];
 }
 
+/** Add a brief label unless it's already present (case-insensitive); order preserved, primary first. */
+export function addBriefLabel(labels: string[], label: string): string[] {
+  if (labels.some((l) => l.toLowerCase() === label.toLowerCase())) return labels;
+  return [...labels, label];
+}
+
 export class StoryStore {
   constructor(private db: D1Database) {}
 
@@ -54,18 +65,23 @@ export class StoryStore {
     slackTs: string;
     channel: string;
     briefLabel: string | null;
+    briefLabels: string[];
     primary: unknown;
     outlets: Outlet[];
+    simhash: string | null;
+    mediaType: string | null;
     now: number;
   }): Promise<void> {
     await this.db
       .prepare(
         `INSERT INTO stories
-           (story_key, slack_ts, channel, brief_label, primary_mention_json, outlets_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           (story_key, slack_ts, channel, brief_label, primary_mention_json, outlets_json,
+            brief_labels_json, simhash, media_type, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(story_key) DO UPDATE SET
            slack_ts=excluded.slack_ts, channel=excluded.channel, brief_label=excluded.brief_label,
            primary_mention_json=excluded.primary_mention_json, outlets_json=excluded.outlets_json,
+           brief_labels_json=excluded.brief_labels_json, simhash=excluded.simhash, media_type=excluded.media_type,
            created_at=excluded.created_at, updated_at=excluded.updated_at`,
       )
       .bind(
@@ -75,16 +91,29 @@ export class StoryStore {
         row.briefLabel,
         JSON.stringify(row.primary),
         JSON.stringify(row.outlets),
+        JSON.stringify(row.briefLabels),
+        row.simhash,
+        row.mediaType,
         row.now,
         row.now,
       )
       .run();
   }
 
-  async updateOutlets(key: string, outlets: Outlet[], now: number): Promise<void> {
+  /** Update the outlet list and matched-brief set after folding in another mention. */
+  async updateOutlets(key: string, outlets: Outlet[], briefLabels: string[], now: number): Promise<void> {
     await this.db
-      .prepare(`UPDATE stories SET outlets_json = ?, updated_at = ? WHERE story_key = ?`)
-      .bind(JSON.stringify(outlets), now, key)
+      .prepare(`UPDATE stories SET outlets_json = ?, brief_labels_json = ?, updated_at = ? WHERE story_key = ?`)
+      .bind(JSON.stringify(outlets), JSON.stringify(briefLabels), now, key)
       .run();
+  }
+
+  /** Recent stories that carry a SimHash (broadcast), for near-duplicate lookup. */
+  async recentWithSimhash(sinceMs: number): Promise<StoryRow[]> {
+    const res = await this.db
+      .prepare(`SELECT * FROM stories WHERE simhash IS NOT NULL AND updated_at >= ?`)
+      .bind(sinceMs)
+      .all<StoryRow>();
+    return res.results ?? [];
   }
 }

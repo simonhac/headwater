@@ -24,6 +24,25 @@ export interface BriefRule {
   requireKeyword?: boolean;
   /** Optional Slack channel override for this brief. */
   channel?: string;
+  /** Hex colour for the message's left bar, so each Organisation Brief is visually distinct. */
+  color?: string;
+}
+
+/** Left-bar colour used for the default brief and any brief without an explicit `color`. */
+export const DEFAULT_BRIEF_COLOR = "#868e96";
+
+/** Fold near-identical broadcast segments (same clip across stations) into one card. */
+export interface NearDuplicateConfig {
+  /** Master switch for SimHash-based broadcast near-dup merging. */
+  enabled: boolean;
+  /** Only look back this many hours for a near-duplicate to merge into. */
+  windowHours: number;
+  /** Max Hamming distance between 64-bit SimHashes to treat as the same segment (lower = stricter). */
+  maxHammingDistance: number;
+  /** Word-shingle size fed into the SimHash. */
+  shingleSize: number;
+  /** Media types this applies to (case-insensitive substring match against a mention's mediaType). */
+  mediaTypes: string[];
 }
 
 export interface FeedConfig {
@@ -41,6 +60,8 @@ export interface FeedConfig {
   allowedCountryCodes: string[] | null;
   /** Drop mentions with no matched keywords at all. */
   requireMatchedKeyword: boolean;
+  /** Broadcast near-duplicate merging (SimHash). */
+  nearDuplicate: NearDuplicateConfig;
   briefs: BriefRule[];
   /** Fallback brief label when none matches. */
   defaultBriefLabel: string;
@@ -55,20 +76,44 @@ export const feedConfig: FeedConfig = {
   sourceBlocklist: [],
   allowedCountryCodes: null,
   requireMatchedKeyword: false,
+  nearDuplicate: {
+    enabled: true,
+    windowHours: 6,
+    maxHammingDistance: 3,
+    shingleSize: 3,
+    mediaTypes: ["radio", "tv", "television", "broadcast"],
+  },
   defaultBriefLabel: "Media Monitoring",
   briefs: [
-    // --- replace these examples with your real Meltwater searches ---
+    // Real Meltwater searches (the payload's `source` field). `matchNames` match that value;
+    // `keywords` drive the pill highlighting + "Mentions:" line — tune them as you see fit.
     {
-      id: "example-org",
-      label: "Example Org",
-      matchNames: ["example org", "example"],
-      keywords: ["Example Org", "Example Foundation"],
+      id: "mps",
+      label: "MPs",
+      matchNames: ["mps"],
+      keywords: ["Andrew Wilkie", "Jacqui Scruby", "MP"],
+      color: "#4263eb", // indigo
     },
     {
-      id: "example-people",
-      label: "Key People",
-      matchNames: ["key people"],
-      keywords: ["Jane Doe", "John Smith"],
+      id: "teals",
+      label: "Teals",
+      matchNames: ["teals"],
+      keywords: ["teal", "independent"],
+      color: "#0ca678", // teal
+    },
+    {
+      id: "climate-200",
+      label: "Climate 200",
+      matchNames: ["climate 200"],
+      keywords: ["Climate 200"],
+      color: "#f76707", // orange
+    },
+    {
+      id: "vic-state",
+      label: "Vic State",
+      matchNames: ["vic state"],
+      keywords: [],
+      color: "#ae3ec9", // purple
     },
   ],
 };

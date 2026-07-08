@@ -69,12 +69,36 @@ pnpm deploy                                      # → https://meltwater-feed.<s
 Gate `/inspect` with **Cloudflare Access** in prod for real protection (the `?key=` is a minimal fallback).
 
 ## Wire up Meltwater
-1. **Account → Third party integrations → Generic Webhook → Connect** — paste your webhook URL
-   (`https://<your-host>/webhooks/meltwater/<WEBHOOK_SHARED_SECRET>`) and give it a name.
-2. This step only registers the *destination*. To make mentions flow, go to **Alerts** and set an
-   alert's delivery method to that Generic Webhook (the search → webhook binding lives under Alerts,
-   not the integrations page). There is no "test" button — it POSTs on the next matching mention.
-3. Watch `/inspect` for the first real payload, then tighten `src/lib/meltwater/parse.ts` to the actual field names.
+Two separate steps. Registering the webhook **destination** is not enough on its own — you must also
+point one or more **alerts** at it. Both live in the Meltwater app.
+
+### a. Set up the Generic Webhook (the destination)
+1. **Account → Third-party Integrations → Generic Webhook → Connect.**
+2. Give it a **name** (e.g. `meltwater-feed-shac`) and paste the webhook **URL**:
+   `https://<your-host>/webhooks/meltwater/<WEBHOOK_SHARED_SECRET>`
+   The path token **is** the auth — it must match the Worker's `WEBHOOK_SHARED_SECRET` secret exactly.
+3. **Add.** This only registers the destination — no mentions flow yet.
+
+### b. Point alerts at the webhook (the binding)
+The search → webhook binding lives under **Alerts**, not the integrations page. The destination
+sends nothing until an alert names it as a delivery method.
+1. Open **Alerts** (the 🔔 in the left sidebar — its own top-level item) → **Create alert**
+   (or **Monitor → Views → Create Alert**). To add the webhook to an *existing* alert, open that
+   alert and skip to step 4.
+2. Under **Smart Alerts → Search Alerts**, use **Every Mention** — the real-time, per-article type.
+   Avoid *Spike Detection* / digest types; they don't deliver each article.
+3. **+ Add search** — pick the saved search(es) to forward (up to 10 per alert).
+4. Under **Delivery method**, expand **Generic Webhook** and tick your connection
+   (e.g. `meltwater-feed-shac`). An alert can use several methods at once — leave **Email** ticked to
+   keep the email alert too, or untick it for webhook-only.
+5. **Save.** Repeat for every alert/search you want in the feed.
+
+There is **no "test" button** — Meltwater POSTs on the next matching mention. Watch `/inspect?key=…`
+for the first real payload, then tighten `src/lib/meltwater/parse.ts` to the actual field names.
+
+> The search/alert name Meltwater sends becomes the Slack **brief label** (matched against
+> `matchNames` in `src/config/feed.config.ts`). A non-match still posts under `defaultBriefLabel`, so
+> naming never blocks delivery — it only affects labeling.
 
 ## Wire up Slack
 1. Create a Slack app → add bot scope `chat:write` (optionally `chat:write.public`) → install → copy the `xoxb-…` token.

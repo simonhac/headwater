@@ -3,6 +3,7 @@ import type { Env } from "@/env";
 import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
 import { processEvent } from "@/lib/process";
+import { replayArchivedEvents } from "@/lib/replay";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
 
@@ -25,6 +26,7 @@ app.get("/health", async (c) => {
   }
   return c.json({
     service: "meltwater-feed",
+    build: "classic-attachment-5", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     configured: {
@@ -85,6 +87,24 @@ app.get("/api/webhooks/recent", async (c) => {
   const limit = Math.min(Number(c.req.query("limit") ?? "50") || 50, 200);
   const events = await new EventLog(c.env.DB).recent(limit);
   return c.json(events);
+});
+
+// --- admin: reparse + repost the archived real webhooks (gated by REPLAY_KEY) ---
+app.post("/admin/replay", async (c) => {
+  const gate = checkKey(c.req.query("key"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  if (c.env.POSTING_ENABLED !== "true") return c.text("POSTING_ENABLED is not true", 409);
+  try {
+    const result = await replayArchivedEvents(c.env, {
+      reset: c.req.query("reset") === "1",
+      purge: c.req.query("purge") === "1",
+      purgeOnly: c.req.query("purgeOnly") === "1",
+    });
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
 });
 
 app.get("/inspect", async (c) => {

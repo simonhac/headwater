@@ -1,4 +1,5 @@
 import type { NormalizedMention } from "./types";
+import { hostnameOf, mastheadForDomain } from "./outlets";
 
 /**
  * DEFENSIVE parser. Meltwater's Generic Webhook payload schema is undocumented,
@@ -94,9 +95,101 @@ const KEYS = {
   matchedKeywords: ["document_matched_keywords", "matched_keywords", "keywords", "matchedKeywords", "hit_keywords"],
 } as const;
 
+/**
+ * Meltwater's "Every Mention" alert webhook is a FLAT object with very different semantics from
+ * the structured `documents[]` shape — `source` is the brief (not the outlet), `type` is literally
+ * "Every Mention", the outlet lives in `authorName`, the medium in `providerType`, reach + sentiment
+ * are baked into `statusLine`, and the link is a Meltwater licensed/tracking redirect under `links`.
+ * The generic candidate lists mis-read all of these, so this shape gets its own explicit mapping.
+ */
+function isEveryMention(doc: Record<string, Json>): boolean {
+  return doc["type"] === "Every Mention" || ("providerType" in doc && "statusLine" in doc);
+}
+
+/** Map Meltwater medium codes to our simple set (e.g. "tveyes_radio" → "radio"). */
+function normalizeMedium(v: Json): string | null {
+  const s = str(v);
+  if (!s) return null;
+  const m = /^tveyes[_-](\w+)/i.exec(s);
+  return (m ? m[1]! : s).toLowerCase();
+}
+
+/** Reach out of a status line like "🔊 1.59M Reach — 😔 Negative Sentiment". */
+function reachFromStatusLine(v: Json): number | null {
+  const s = str(v);
+  if (!s) return null;
+  const m = /([\d.]+)\s*([kmb])?\s*reach/i.exec(s);
+  if (!m) return null;
+  const mult = { k: 1e3, m: 1e6, b: 1e9 }[(m[2] ?? "").toLowerCase()] ?? 1;
+  const n = parseFloat(m[1]!) * mult;
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+function sentimentFromStatusLine(v: Json): string | null {
+  const s = str(v);
+  if (!s) return null;
+  const m = /\b(positive|neutral|negative)\b/i.exec(s);
+  return m ? m[1]!.toLowerCase() : null;
+}
+
+/** Unwrap a Meltwater tracking redirect (…?u=<double-encoded real url>) to the underlying URL. */
+function unwrapTrackingUrl(v: Json): string | null {
+  const s = str(v);
+  if (!s) return null;
+  try {
+    const u = new URL(s).searchParams.get("u");
+    return u ? decodeURIComponent(u) : s;
+  } catch {
+    return s;
+  }
+}
+
+/** Strip trailing Meltwater annotations from an outlet name, e.g. "(Print version) (Licensed by …)". */
+function cleanOutletName(v: Json): string | null {
+  let s = str(v);
+  if (!s) return null;
+  while (/\)\s*$/.test(s)) {
+    const trimmed = s.replace(/\s*\([^)]*\)\s*$/, "").trim();
+    if (trimmed === s) break;
+    s = trimmed;
+  }
+  return s || null;
+}
+
+function everyMentionToMention(doc: Record<string, Json>, topBrief: string | null): NormalizedMention {
+  const links = asRecord(doc["links"]) ?? {};
+  const outletUrl = unwrapTrackingUrl(links["source"]); // publisher home (for the logo + masthead)
+  const rawAuthor = cleanOutletName(doc["authorName"]);
+  // `authorName` is the outlet for some content but a byline for wire/agency content; when the
+  // publisher domain resolves to a known masthead, use that and treat `authorName` as the byline.
+  const masthead = mastheadForDomain(hostnameOf(outletUrl));
+  const sourceName = masthead ?? rawAuthor;
+  const author =
+    masthead && rawAuthor && rawAuthor.toLowerCase() !== masthead.toLowerCase() ? rawAuthor : null;
+  return {
+    url: str(links["article"]) ?? str(pick(doc, [...KEYS.url])), // keep the licensed/tracking link as-is
+    outletUrl,
+    title: str(pick(doc, [...KEYS.title])),
+    sourceName,
+    mediaType: normalizeMedium(doc["providerType"]),
+    countryCode: str(pick(doc, [...KEYS.countryCode])),
+    reach: reachFromStatusLine(doc["statusLine"]),
+    sentiment: sentimentFromStatusLine(doc["statusLine"]),
+    publishedAt: isoDate(pick(doc, [...KEYS.publishedAt])), // no explicit date in this shape → usually null
+    snippet: str(doc["text"]),
+    author,
+    briefName: str(doc["source"]) ?? topBrief,
+    imageUrl: str(doc["image"]),
+    matchedKeywords: keywords(doc["keywords"]),
+    raw: doc,
+  };
+}
+
 function toMention(doc: Record<string, Json>, topBrief: string | null): NormalizedMention {
+  if (isEveryMention(doc)) return everyMentionToMention(doc, topBrief);
   return {
     url: str(pick(doc, [...KEYS.url])),
+    outletUrl: null,
     title: str(pick(doc, [...KEYS.title])),
     sourceName: str(pick(doc, [...KEYS.sourceName])),
     mediaType: str(pick(doc, [...KEYS.mediaType])),

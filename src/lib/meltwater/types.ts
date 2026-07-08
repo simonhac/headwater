@@ -6,6 +6,8 @@
  */
 export interface NormalizedMention {
   url: string | null;
+  /** The outlet's home/section URL when distinct from `url` (used to pick the logo favicon). */
+  outletUrl: string | null;
   title: string | null;
   sourceName: string | null;
   mediaType: string | null; // news / online_news / radio / social / print ...

@@ -15,4 +15,6 @@ export interface Env {
   SLACK_BOT_TOKEN?: string;
   /** Default Slack channel id/name for the trial feed */
   SLACK_DEFAULT_CHANNEL?: string;
+  /** Query-key guarding POST /admin/replay (reparse + repost archived events). */
+  REPLAY_KEY?: string;
 }
