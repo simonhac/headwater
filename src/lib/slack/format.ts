@@ -173,13 +173,21 @@ export function buildAttachment(
   const masthead = m.sourceName ?? "Unknown source";
   const title = cleanTitle(m.title) ?? m.url ?? "(untitled)";
 
-  // body: snippet-with-pills if the snippet contains a keyword, else a "Mentions:" line
+  // body: when there's a snippet, always show it (keywords highlighted as pills) and, if any tracked
+  // keyword is mentioned in the item but NOT visible in the shown snippet, append an
+  // "(also mentions `kw` …)" suffix. With no snippet, fall back to the "Mentions: kw (n)" summary.
   const fullText = `${m.title ?? ""} ${m.snippet ?? ""}`.trim();
   let text: string | undefined;
-  if (m.snippet && kws.length && hasAnyKeyword(m.snippet, kws)) {
-    text = highlightKeywordsAsCode(truncate(m.snippet), kws);
+  if (m.snippet) {
+    const shown = truncate(m.snippet);
+    const body = highlightKeywordsAsCode(shown, kws); // escapes + pills; plain-escaped when kws empty
+    const alsoMentions = kws.filter((k) => !hasAnyKeyword(shown, [k]) && hasAnyKeyword(fullText, [k]));
+    const suffix = alsoMentions.length
+      ? ` (also mentions ${alsoMentions.map((k) => "`" + escapeMrkdwn(k) + "`").join(" ")})`
+      : "";
+    text = body + suffix;
   } else {
-    text = buildMentionsLine(fullText, kws) ?? (m.snippet ? escapeMrkdwn(truncate(m.snippet)) : undefined);
+    text = buildMentionsLine(fullText, kws) ?? undefined;
   }
 
   // Author | Organisation Brief columns

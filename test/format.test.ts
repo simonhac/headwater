@@ -134,14 +134,41 @@ describe("buildAttachment — body text", () => {
     expect(a.text).toContain("`Ross Garnaut`");
   });
 
-  it("uses a 'Mentions:' line when the keyword is only in the title, not the snippet", () => {
+  it("shows the snippet plus an 'also mentions' suffix when a keyword is only in the title", () => {
     const a = buildAttachment(
       mention({ title: "Renewable push", snippet: "No matching term here at all." }),
       brief,
     );
-    // buildMentionsLine runs over title+snippet, so the title keyword produces a Mentions line.
-    expect(a.text).toContain("Mentions:");
-    expect(a.text).toContain("`renewable (1)`");
+    // The snippet is always shown; the title-only keyword is surfaced as an "also mentions" pill.
+    expect(a.text).toContain("No matching term here at all.");
+    expect(a.text).toContain("(also mentions `renewable`)");
+    expect(a.text).not.toContain("Mentions:");
+  });
+
+  it("appends no 'also mentions' suffix when every keyword is already visible in the snippet", () => {
+    const a = buildAttachment(
+      mention({ title: "Big renewable news", snippet: "The renewable rollout and Ross Garnaut said more." }),
+      brief,
+    );
+    expect(a.text).toContain("`renewable`");
+    expect(a.text).toContain("`Ross Garnaut`");
+    expect(a.text).not.toContain("also mentions");
+  });
+
+  it("lists only keywords actually present in the item (regression: Teals card)", () => {
+    // Real card: 'teal' is only in the title; the snippet and the unrelated keywords appear nowhere.
+    const a = buildAttachment(
+      mention({
+        title: "Labor and teal preferences",
+        snippet: "predicting preferences from One Nation, Labor and the",
+        matchedKeywords: ["the teals"],
+      }),
+      { id: "teals", label: "Teals", keywords: ["teal", "independent"] },
+    );
+    expect(a.text).toContain("predicting preferences from One Nation, Labor and the");
+    expect(a.text).toContain("(also mentions `teal`)");
+    expect(a.text).not.toContain("the teals");
+    expect(a.text).not.toContain("independent");
   });
 
   it("renders the plain (escaped) snippet when no keyword appears anywhere", () => {
