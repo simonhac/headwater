@@ -10,6 +10,10 @@ export interface InspectPaging {
   before: number | null;
   /** received_at to load the next older page, or null when there's no older page. */
   olderCursor: number | null;
+  /** True when the `?filter=failed` view is active (errored / undelivered events only). */
+  failedOnly?: boolean;
+  /** Count of failed/undelivered events (last 7 days) — drives the header badge. */
+  failedCount?: number;
 }
 
 function pretty(json: string | null): string {
@@ -39,7 +43,8 @@ function fmtTime(ms: number): string {
 }
 
 function statLine(s: ProcessSummary): string {
-  return `${s.total} docs · ${s.posted} posted · ${s.dropped} dropped · ${s.duplicates} dup · ${s.merged} merged`;
+  const failed = s.failed ? ` · ${s.failed} failed` : ""; // absent on pre-change summaries
+  return `${s.total} docs · ${s.posted} posted · ${s.dropped} dropped · ${s.duplicates} dup · ${s.merged} merged${failed}`;
 }
 
 /** The inline debug panel (revealed on click): decision, brief, ts, time, stats, reason + raw. */
@@ -114,14 +119,21 @@ function renderStream(ascending: WebhookEventRecord[], now: number): string {
   return out;
 }
 
+/** Compose "/inspect?a&b" from non-empty query parts — clean (no stray "?&") when there are none.
+ * `keyQS` is empty now that auth is Cloudflare Access (no ?key=), but stays threaded for local dev. */
+function inspectHref(parts: string[]): string {
+  const qs = parts.filter(Boolean).join("&amp;");
+  return qs ? `/inspect?${qs}` : "/inspect";
+}
+
 function renderPager(keyQS: string, paging: InspectPaging): string {
-  const q = escHtml(keyQS);
+  const base = [escHtml(keyQS), paging.failedOnly ? "filter=failed" : ""]; // keep the filter across pages
   const links: string[] = [];
   if (paging.olderCursor !== null) {
-    links.push(`<a href="/inspect?${q}&amp;before=${paging.olderCursor}">⌃ Older messages</a>`);
+    links.push(`<a href="${inspectHref([...base, `before=${paging.olderCursor}`])}">⌃ Older messages</a>`);
   }
   if (paging.before !== null) {
-    links.push(`<a href="/inspect?${q}">Latest ›</a>`);
+    links.push(`<a href="${inspectHref(base)}">Latest ›</a>`);
   }
   return links.length ? `<div class="pager">${links.join("")}</div>` : "";
 }
@@ -130,18 +142,28 @@ export function renderInspectPage(events: WebhookEventRecord[], keyQS: string, p
   const now = Date.now();
   // `events` arrive newest-first; display oldest→newest (Slack-style, newest at the bottom).
   const ascending = [...events].reverse();
-  const stream = events.length
-    ? renderPager(keyQS, paging) + renderStream(ascending, now)
+  const emptyMsg = paging.failedOnly
+    ? `<p class="empty">No failed or undelivered events in view. 🎉</p>`
     : `<p class="empty">No webhook events yet. Point a Meltwater Generic Webhook at <code>/webhooks/meltwater/&lt;secret&gt;</code>.</p>`;
+  const stream = events.length ? renderPager(keyQS, paging) + renderStream(ascending, now) : emptyMsg;
   // Auto-scroll to the newest card only on the latest page (not while paging through history).
-  const autoscroll = paging.before === null && events.length > 0 ? "1" : "";
+  const autoscroll = paging.before === null && events.length > 0 && !paging.failedOnly ? "1" : "";
+  const kq = escHtml(keyQS);
+  const failedCount = paging.failedCount ?? 0;
+  const filterNav = paging.failedOnly
+    ? `<a href="${inspectHref([kq])}">‹ all messages</a> · `
+    : failedCount > 0
+      ? `<a class="failed-badge" href="${inspectHref([kq, "filter=failed"])}">⚠ ${failedCount} failed</a> · `
+      : "";
+  const refreshHref = inspectHref([kq, paging.failedOnly ? "filter=failed" : ""]);
+  const rawHref = kq ? `/api/webhooks/recent?${kq}` : "/api/webhooks/recent";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Headwater — inspect</title>
 <style>${INSPECT_CSS}</style></head><body>
 <header class="topbar">
   <h1>Headwater — webhook feed</h1>
-  <nav><a href="/inspect?${escHtml(keyQS)}">↻ refresh</a> · <a href="/api/webhooks/recent?${escHtml(keyQS)}">raw JSON</a></nav>
+  <nav>${filterNav}<a href="${refreshHref}">↻ refresh</a> · <a href="${rawHref}">raw JSON</a></nav>
 </header>
 <main class="stream">${stream}</main>
 <script>

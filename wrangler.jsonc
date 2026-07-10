@@ -34,8 +34,11 @@
     }
   ],
   "triggers": {
-    // Ingestion heartbeat — hourly check that Meltwater webhooks are still arriving (src/lib/heartbeat.ts).
-    // Alerts Slack (once per re-alert window) if the feed goes quiet past HEARTBEAT_MAX_SILENCE_HOURS.
-    "crons": ["0 * * * *"]
+    // Two scheduled jobs (dispatched by controller.cron in scheduled(), src/index.ts):
+    // - "*/15 * * * *" — self-healing reconcile: re-run the recent archive window so un-posted
+    //   stragglers re-post (seen-aware, so everything already delivered is skipped).
+    // - "0 * * * *" — hourly ingestion heartbeat: alert Slack if Meltwater webhooks go quiet
+    //   (src/lib/heartbeat.ts).
+    "crons": ["*/15 * * * *", "0 * * * *"]
   }
 }

@@ -13,7 +13,7 @@ disabled), and posts it — replacing Meltwater's noisy built-in Slack feed.
 - **Broadcast station names:** radio/TV alerts don't carry the station — it's resolved from Meltwater's JS viewer and cached in D1 (see [Broadcast station names](#broadcast-station-names))
 - **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (dedupe), `stories` (syndication tracking + `render_hash` for the redecode backfill), `broadcast_stations` + `station_names` (radio/TV station resolution), `ops_state` (heartbeat bookkeeping)
 - **Cloudflare resources:** **Workers** (the app), **D1** (all persistence above), and **Browser Rendering** (the `browser` binding — headless Chromium, used *only* for first-time station-name resolution; a few seconds per new station, well within the free 10 min/day)
-- **Inspect:** `GET /inspect?key=…` — recent events, raw payload, filter decision + reason, Block Kit preview
+- **Inspect:** `GET /inspect` (Cloudflare Access) — recent events, raw payload, filter decision + reason, Block Kit preview
 - **Monitoring:** `GET /health` validates the runtime config (`configOk`); an hourly cron **heartbeat** alerts Slack if ingestion goes quiet (`src/lib/heartbeat.ts`)
 
 Deferred (not built): RSS-poll fallback and the native REST API path. Print is excluded (no plan credit).
@@ -23,9 +23,9 @@ Auth model (all fail-closed except the two public routes) — see [Access & secu
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `GET /health` | none (public) | health/status JSON (no secrets); `configOk` boolean; `/` returns 404 |
-| `POST /webhooks/meltwater/:token` | path token = `WEBHOOK_SHARED_SECRET` | receive a Meltwater alert |
-| `GET /inspect` | **Cloudflare Access** (login) | inspection UI |
+| `GET /health` | none (public) | health/status JSON (no secrets); a `drift` gauge (`errors`, `unposted`) + `configOk` boolean; `/` returns 404 |
+| `POST /webhooks/meltwater/:token` | path token = `WEBHOOK_SHARED_SECRET` | receive a Meltwater alert (archive write retries; returns 5xx if it can't persist) |
+| `GET /inspect` | **Cloudflare Access** (login) | inspection UI (`?filter=failed` shows only errored/undelivered events) |
 | `GET /api/webhooks/recent` | **Cloudflare Access** | recent events as JSON |
 | `POST /admin/redecode` | `Authorization: Bearer REPLAY_KEY` | re-render recent cards under the current decoding and `chat.update` the changed ones in place (non-destructive). `dryRun=1` previews; `hours=N` sets the window (default 168); capped at 40 updates/call (re-run until `remaining` is 0) |
 | `POST /admin/replay` | `Authorization: Bearer REPLAY_KEY` | reparse + **repost** archived events (destructive — clears + reposts; prefer `/admin/redecode`) |
@@ -48,7 +48,27 @@ open "http://localhost:8787/inspect"   # /inspect is Access-gated in prod; DEV_S
 
 `POSTING_ENABLED` (in `wrangler.jsonc`) toggles Slack posting. Set it to `"false"` to
 **pause** — the pipeline still parses, filters and renders a Block Kit **preview**
-(visible in `/inspect`) without posting. Set `"true"` to go live.
+(visible in `/inspect`) without posting. Set `"true"` to go live. Note: after you un-pause,
+the next reconcile tick posts any un-posted events from the last 72h (the backlog accumulated
+while paused) — purge/narrow first if you don't want the catch-up.
+
+## Reliability (self-healing)
+The archive is the source of truth; the Slack channel is a derived, rebuildable projection.
+- **Archive-first ingestion.** Each raw payload is written to `webhook_events` **before** any
+  processing, with a short retry; if that write can't land it returns **5xx** so Meltwater retries.
+- **Scheduled reconcile.** A Cron Trigger (`*/15 * * * *`, `scheduled()` in `src/index.ts`) re-runs
+  the recent archive window (last 72h, excluding the last ~15 min) back through the pipeline. It's
+  `seen`-aware, so already-delivered mentions are skipped as duplicates and only **un-posted
+  stragglers** actually re-post/merge — a transient Slack/D1 failure self-heals within a tick or two
+  without operator action. `EventLog.markProcessed` is monotonic, so re-runs never downgrade a
+  delivered event's row.
+- **Drift visibility.** `GET /health` reports `drift.errors` + `drift.unposted` (last 7 days);
+  `/inspect?filter=failed` lists the offending events. The reconcile also `console.warn`s a summary
+  (Workers observability) when a pass leaves anything still failed.
+- **Manual backfill.** `POST /admin/replay` (`Authorization: Bearer REPLAY_KEY`) reprocesses the
+  archive: `reset=1` rebuilds dedupe/story state, `purge=1` clears the channel first, `limit=N`
+  regenerates the most recent N. Idempotent — safe to re-run. (For a format-only refresh that keeps
+  reactions/threads, prefer `POST /admin/redecode`.)
 
 ## Tuning the feed
 Edit `src/config/feed.config.ts`. Start lenient, watch `/inspect` on real traffic, then tighten:
@@ -82,7 +102,7 @@ correcting a station is a one-row `INSERT` into `station_names` — **no deploy,
 npx wrangler d1 execute headwater --remote \
   --command "INSERT OR REPLACE INTO station_names (code, name) VALUES ('8645', '702 ABC Sydney')"
 ```
-`GET /admin/render-station?key=<REPLAY_KEY>&url=<viewer url>` renders a viewer URL on demand to check
+`GET /admin/render-station?url=<viewer url>` (`Authorization: Bearer REPLAY_KEY`) renders a viewer URL on demand to check
 what a station resolves to. The `/admin/redecode` backfill re-applies station names to already-posted
 cards from the D1 map only (it never renders), so old clips upgrade once their station is known.
 

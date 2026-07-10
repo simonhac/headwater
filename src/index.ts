@@ -7,6 +7,7 @@ import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
 import { accessOk, checkBearer } from "@/lib/auth";
+import { withRetry } from "@/lib/retry";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
@@ -21,12 +22,49 @@ app.use("*", async (c, next) => {
   c.header("Referrer-Policy", "no-referrer");
 });
 
+/** How far back /health's drift gauge looks (keeps the count bounded + actionable). */
+const DRIFT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** Reconcile look-back: the 72h syndication window, so a straggler can still merge into its story. */
+const RECONCILE_LOOKBACK_MS = 72 * 60 * 60 * 1000;
+/** Don't reconcile events newer than this — let the live `waitUntil` path settle first so the cron
+ * never races in-flight processing (a fresh straggler just heals on a later tick). */
+const RECONCILE_SETTLE_MS = 15 * 60 * 1000;
+/** Ingestion archive-write backoff (ms): 3 attempts total before returning 5xx. */
+const ARCHIVE_RETRY_BACKOFFS_MS = [50, 150];
+
+/**
+ * Self-healing sweep (Cron Trigger). Re-runs a bounded, recent window of archived events back
+ * through the pipeline. Because dedupe/merge are `seen`-aware, already-handled mentions are skipped
+ * as duplicates (no Slack call) and only un-posted stragglers actually re-post/merge —
+ * `EventLog.markProcessed` is monotonic so healthy rows are never downgraded.
+ *
+ * Note: after `POSTING_ENABLED` flips false→true, everything archived while paused is un-`seen`, so
+ * the next tick catches up the last-72h backlog (bounded by the window + Slack's rate-limit backoff).
+ */
+async function reconcile(env: Env): Promise<void> {
+  if (env.POSTING_ENABLED !== "true") return; // mirror the /admin/replay gate
+  const now = Date.now();
+  const res = await replayArchivedEvents(env, { sinceMs: now - RECONCILE_LOOKBACK_MS, untilMs: now - RECONCILE_SETTLE_MS });
+  // Surface drift to Workers observability (already enabled). A non-zero `failed`/`errors` that
+  // doesn't drain across ticks means a genuinely stuck event worth a look.
+  if (res.posted || res.merged || res.failed || res.errors) {
+    console.warn(
+      `[reconcile] events=${res.events} healed_posted=${res.posted} healed_merged=${res.merged} still_failed=${res.failed} errors=${res.errors}`,
+    );
+  }
+}
+
 // --- health / status (no secrets leaked). Root "/" falls through to 404. ---
 app.get("/health", async (c) => {
   let count = 0;
+  // Drift gauge over the last DRIFT_WINDOW_MS: `errors` = failed/threw events, `unposted` =
+  // archived-but-never-delivered. Non-zero counts that don't drain across reconcile ticks = drift.
+  let drift: { errors: number; unposted: number } | null = null;
   try {
+    const log = new EventLog(c.env.DB);
     const row = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM webhook_events`).first<{ n: number }>();
     count = row?.n ?? 0;
+    drift = await log.driftCounts(Date.now() - DRIFT_WINDOW_MS);
   } catch {
     /* DB not migrated yet */
   }
@@ -37,6 +75,7 @@ app.get("/health", async (c) => {
     build: "headwater-10", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
+    drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
     configOk: config.ok,
     configured: {
       webhookSecret: !!c.env.WEBHOOK_SHARED_SECRET,
@@ -67,13 +106,18 @@ app.post("/webhooks/meltwater/:token", async (c) => {
   } catch {
     parseError = "non_json_body";
   }
-  await eventLog.append({
-    id,
-    receivedAt,
-    raw,
-    decision: parseError ? "error" : "logged",
-    reason: parseError,
-  });
+  // The archive is the source of truth. If we can't even persist the payload after a few tries,
+  // fail loud (5xx) so the sender retries rather than silently ack'ing a lost mention. `append` is
+  // INSERT OR IGNORE, so a retry after a partial commit is a safe no-op.
+  try {
+    await withRetry(
+      () => eventLog.append({ id, receivedAt, raw, decision: parseError ? "error" : "logged", reason: parseError }),
+      ARCHIVE_RETRY_BACKOFFS_MS,
+    );
+  } catch (e) {
+    console.error(`[ingest] archive write failed for ${id}: ${String(e)}`);
+    return c.text("archive_failed", 500);
+  }
 
   // Ack immediately; do parse/filter/post after the response (Workers' after-response primitive).
   if (!parseError) {
@@ -167,18 +211,28 @@ app.get("/inspect", async (c) => {
   const PAGE_SIZE = 50;
   const beforeRaw = Number(c.req.query("before"));
   const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : null;
-  const events = await new EventLog(c.env.DB).page(before, PAGE_SIZE);
+  const failedOnly = c.req.query("filter") === "failed";
+  const log = new EventLog(c.env.DB);
+  const sinceMs = Date.now() - DRIFT_WINDOW_MS; // failed list + badge share one window so they agree
+  const events = failedOnly ? await log.failures(sinceMs, before, PAGE_SIZE) : await log.page(before, PAGE_SIZE);
   // A full page implies older history may exist; the cursor is the oldest row shown.
   const olderCursor = events.length === PAGE_SIZE ? events[events.length - 1]!.received_at : null;
+  const failedCount = await log.failuresCount(sinceMs).catch(() => 0);
   // No ?key= needed — Access's session cookie authenticates the pager/JSON links.
-  return c.html(renderInspectPage(events, "", { before, olderCursor }));
+  return c.html(renderInspectPage(events, "", { before, olderCursor, failedOnly, failedCount }));
 });
 
-// Cron trigger (wrangler.jsonc `triggers.crons`): the ingestion heartbeat. Never throw out of
-// scheduled() — a rejected cron just retries noisily; the check self-reports via its return value.
+// Cron Triggers (wrangler.jsonc `triggers.crons`), dispatched by controller.cron:
+//   "*/15 * * * *" → self-healing reconcile;  "0 * * * *" → hourly ingestion heartbeat.
+// (At the top of the hour both fire — Cloudflare invokes scheduled() once per matching cron.)
+// Never throw out of scheduled() — a rejected cron just retries noisily; each job self-reports.
 export default {
   fetch: app.fetch,
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runHeartbeat(env, Date.now()).catch(() => {}));
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    if (controller.cron === "0 * * * *") {
+      ctx.waitUntil(runHeartbeat(env, Date.now()).catch(() => {}));
+    } else {
+      ctx.waitUntil(reconcile(env).catch((e) => console.error(`[reconcile] failed: ${String(e)}`)));
+    }
   },
 } satisfies ExportedHandler<Env>;

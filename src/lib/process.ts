@@ -43,6 +43,8 @@ export interface ProcessSummary {
   dropped: number;
   duplicates: number;
   merged: number;
+  /** Kept mentions whose Slack post/update failed — un-`seen`, so a replay/reconcile retries them. */
+  failed: number;
   results: DocResult[];
 }
 
@@ -51,6 +53,16 @@ const outletOf = (m: NormalizedMention): Outlet => ({
   url: m.url,
   reach: m.reach,
 });
+
+/** Resolve a broadcast item's station (cached; a cold miss hits Browser Rendering) and prefer it as
+ * the outlet, demoting any reporter in `sourceName` to the byline. No-op when nothing resolves. */
+async function resolveBroadcastOutlet(env: Env, mention: NormalizedMention, now: number): Promise<void> {
+  const station = await resolveStationNameLive(env, mention.raw, now);
+  if (station && station.toLowerCase() !== (mention.sourceName ?? "").toLowerCase()) {
+    if (!mention.author && mention.sourceName) mention.author = mention.sourceName;
+    mention.sourceName = station;
+  }
+}
 
 /** Closest recent broadcast story whose transcript SimHash is within the configured Hamming distance. */
 async function findNearDup(stories: StoryStore, fp: bigint, now: number): Promise<StoryRow | null> {
@@ -89,6 +101,7 @@ export async function processEvent(
   let posted = 0;
   let duplicates = 0;
   let merged = 0;
+  let failed = 0;
   const now = receivedAtMs;
 
   for (const d of dropped) {
@@ -102,31 +115,35 @@ export async function processEvent(
   }
 
   for (const { mention, brief } of kept) {
-    // Broadcast: the station name isn't in the payload — resolve it (cached) and prefer it as the
-    // outlet, demoting any reporter in `sourceName` to the byline.
-    if (isBroadcast(mention.mediaType)) {
-      const station = await resolveStationNameLive(env, mention.raw, now);
-      if (station && station.toLowerCase() !== (mention.sourceName ?? "").toLowerCase()) {
-        if (!mention.author && mention.sourceName) mention.author = mention.sourceName;
-        mention.sourceName = station;
-      }
-    }
+    const broadcast = isBroadcast(mention.mediaType);
+    // Broadcast items carry no station in the payload — resolve it (cached; a cold miss hits Browser
+    // Rendering). Resolve BEFORE the dedupe key only in the rare url-less case where the station is
+    // part of the key; otherwise defer until we know the mention is un-`seen` (below). This keeps the
+    // reconcile — which re-drives the 72h window every 15 min — from re-resolving (and re-rendering)
+    // already-handled broadcast items, which would otherwise re-launch Browser Rendering each tick
+    // for any clip whose station never resolved, exhausting the daily budget.
+    if (broadcast && !mention.url) await resolveBroadcastOutlet(env, mention, now);
 
-    const channel = brief.channel ?? env.SLACK_DEFAULT_CHANNEL ?? "";
-    const blocks = buildAttachment(mention, brief, [], [], now); // stored on DocResult for the /inspect preview
-    const base = { title: mention.title, source: mention.sourceName, url: mention.url, brief: brief.label, blocks };
     // Brief-scoped so the SAME article matched by a DIFFERENT brief isn't silently dropped as a
     // duplicate — it flows into the merge path below and is recorded as "also matched".
     const canonical = mention.url ?? `${mention.sourceName}|${mention.title}`;
     const dedupeKey = await sha256Hex(`${brief.id}|${canonical}`);
     const isSeen = await seen.has(dedupeKey);
 
+    // A url-bearing broadcast we're actually about to post/merge still needs its station for the card
+    // (`buildAttachment` below). Duplicates skip this — their card is only a debug preview.
+    if (broadcast && mention.url && !isSeen) await resolveBroadcastOutlet(env, mention, now);
+
+    const channel = brief.channel ?? env.SLACK_DEFAULT_CHANNEL ?? "";
+    const blocks = buildAttachment(mention, brief, [], [], now); // stored on DocResult for the /inspect preview
+    const base = { title: mention.title, source: mention.sourceName, url: mention.url, brief: brief.label, blocks };
+
     // Fingerprint + existing-story lookup are only needed when we might actually post/merge.
     let simhashStr: string | null = null;
     let key: string | null = null;
     let existing: StoryRow | null = null;
     if (!isSeen && postingEnabled) {
-      const simFp = nd.enabled && isBroadcast(mention.mediaType) ? simhash64(mention.snippet, nd.shingleSize) : null;
+      const simFp = nd.enabled && broadcast ? simhash64(mention.snippet, nd.shingleSize) : null;
       simhashStr = simFp === null ? null : simFp.toString();
       key = mention.title ? await storyKey(mention.title) : null;
       existing = key ? await stories.getFresh(key, now - SYNDICATION_WINDOW_MS) : null;
@@ -153,14 +170,18 @@ export async function processEvent(
       const primaryBrief = resolveBrief(primary, feedConfig);
       const mergedCard = buildAttachment(primary, primaryBrief, otherOutlets(outlets, primary), briefLabels.slice(1), existing.created_at);
       const upd = await updateSlack(env, { channel: existing.channel, ts: existing.slack_ts, attachments: [mergedCard] });
-      if (upd.ok) await stories.updateOutlets(existing.story_key, outlets, briefLabels, attachmentHash(mergedCard), now);
-      await seen.add(dedupeKey, mention.url ?? "", now);
-      merged++;
-      results.push({
-        ...base,
-        decision: "merged",
-        reason: upd.ok ? `folded into ${existing.slack_ts}` : `update_failed:${upd.error ?? "?"}`,
-      });
+      // Only commit state when the update landed — mirror the post path. A failed update leaves the
+      // mention un-`seen` and un-counted so a replay/reconcile retries it (the G1 fix). Committing
+      // unconditionally would mark it `seen` forever and drop the syndicated outlet permanently.
+      if (upd.ok) {
+        await stories.updateOutlets(existing.story_key, outlets, briefLabels, attachmentHash(mergedCard), now);
+        await seen.add(dedupeKey, mention.url ?? "", now);
+        merged++;
+        results.push({ ...base, decision: "merged", reason: `folded into ${existing.slack_ts}` });
+      } else {
+        failed++;
+        results.push({ ...base, decision: "dropped", reason: `merge_failed:${upd.error ?? "unknown"}` });
+      }
       continue;
     }
 
@@ -186,14 +207,25 @@ export async function processEvent(
       posted++;
       results.push({ ...base, decision: "posted", slackTs: r.ts });
     } else {
+      failed++;
       results.push({ ...base, decision: "dropped", reason: `slack_error:${r.error ?? "unknown"}` });
     }
   }
 
-  const summary: ProcessSummary = { total: mentions.length, posted, dropped: dropped.length, duplicates, merged, results };
+  const summary: ProcessSummary = { total: mentions.length, posted, dropped: dropped.length, duplicates, merged, failed, results };
 
+  // Event-level decision, most-significant outcome first. `duplicate` (an all-`seen` re-run) and
+  // `error` (a Slack failure that delivered nothing) are terminal states the reconcile / drift
+  // gauge rely on: `duplicate` keeps a healthy re-run out of the drift count, `error` flags a real
+  // undelivered event. See EventLog.markProcessed (monotonic — this never downgrades a posted row).
   const decision =
-    posted > 0 ? "posted" : merged > 0 ? "merged" : kept.length > 0 && !postingEnabled ? "preview" : dropped.length && !kept.length ? "dropped" : "logged";
+    posted > 0 ? "posted"
+    : merged > 0 ? "merged"
+    : duplicates > 0 ? "duplicate"
+    : kept.length > 0 && !postingEnabled ? "preview"
+    : dropped.length && !kept.length ? "dropped"
+    : failed > 0 ? "error"
+    : "logged";
   const firstTs = results.find((r) => r.slackTs)?.slackTs ?? null;
   await eventLog.markProcessed(eventId, {
     parsed: summary,

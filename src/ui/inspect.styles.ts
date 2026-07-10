@@ -72,6 +72,15 @@ body {
 .topbar nav { font-size: 13px; color: var(--muted); }
 .topbar a { color: var(--link); text-decoration: none; }
 .topbar a:hover { text-decoration: underline; }
+.topbar a.failed-badge {
+  color: #fff;
+  background: var(--crimson);
+  border-radius: 9999px;
+  padding: 1px 9px;
+  font-weight: 700;
+  font-size: 12px;
+}
+.topbar a.failed-badge:hover { text-decoration: none; opacity: 0.9; }
 
 .stream { max-width: 780px; margin: 0 auto; padding: 8px 20px 72px; }
 

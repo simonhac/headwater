@@ -12,7 +12,8 @@ export interface ReplayResult {
   skipped: number; // synthetic/unparseable events skipped
   posted: number;
   merged: number;
-  errors: number;
+  failed: number; // kept mentions whose Slack call failed this pass (still un-`seen` → retried next tick)
+  errors: number; // events that threw during reprocessing
 }
 
 /** Delete this bot's own messages in a channel (clean slate before a backfill). Best-effort. */
@@ -57,10 +58,10 @@ async function purgeBotMessages(env: Env, channel: string): Promise<{ deleted: n
  */
 export async function replayArchivedEvents(
   env: Env,
-  opts: { reset?: boolean; purge?: boolean; purgeOnly?: boolean; limit?: number } = {},
+  opts: { reset?: boolean; purge?: boolean; purgeOnly?: boolean; limit?: number; sinceMs?: number; untilMs?: number } = {},
 ): Promise<ReplayResult> {
   const db = env.DB;
-  const res: ReplayResult = { reset: !!opts.reset, purged: 0, events: 0, skipped: 0, posted: 0, merged: 0, errors: 0 };
+  const res: ReplayResult = { reset: !!opts.reset, purged: 0, events: 0, skipped: 0, posted: 0, merged: 0, failed: 0, errors: 0 };
 
   if (opts.purge || opts.purgeOnly) {
     const p = await purgeBotMessages(env, env.SLACK_DEFAULT_CHANNEL ?? "");
@@ -72,21 +73,47 @@ export async function replayArchivedEvents(
   if (opts.reset) {
     await db.prepare("DELETE FROM seen_mentions").run();
     await db.prepare("DELETE FROM stories").run();
+    // A reset is a rebuild-from-scratch: also blank each event's derived processing columns so the
+    // rebuild reflects current config. Without this, the monotonic `markProcessed` would preserve a
+    // stale `posted`/`slack_ts` on an event that now (e.g. under tightened filters) drops. Skipped
+    // for a `limit` reset, which selects `WHERE posted = 1` and must see the pre-reset posted rows.
+    // Leave `decision = 'error'` rows untouched: an un-parseable (non-JSON) event is skipped by the
+    // reprocess loop below, so blanking it would erase its error signal with nothing to recompute it
+    // (a valid-JSON Slack-failure error IS reprocessed, and the monotonic CASE lets its new outcome
+    // win, so those still rebuild correctly without blanking).
+    if (!opts.limit) {
+      await db
+        .prepare("UPDATE webhook_events SET decision = 'logged', posted = 0, slack_ts = NULL, parsed_json = NULL, error = NULL, reason = NULL WHERE decision != 'error'")
+        .run();
+    }
   }
 
   // Full backfill: every event oldest-first (so syndication/near-dup merging recomputes in order).
   // With `limit`: just the N most recent *posted* real events — still processed oldest-first — for a
   // small spot-check regen after a wipe.
+  // With `sinceMs`/`untilMs` (the reconcile cron): a bounded receipt-time window, oldest-first —
+  // seen-aware, so already-handled mentions are skipped as duplicates and only un-posted stragglers
+  // actually re-post/merge. Never falls into the DESC/`posted=1` limit branch.
   type Row = { id: string; raw_json: string; received_at: number };
-  const rows =
-    opts.limit && opts.limit > 0
-      ? (
-          (await db
-            .prepare("SELECT id, raw_json, received_at FROM webhook_events WHERE posted = 1 ORDER BY received_at DESC LIMIT ?")
-            .bind(opts.limit)
-            .all<Row>()).results ?? []
-        ).reverse()
-      : (await db.prepare("SELECT id, raw_json, received_at FROM webhook_events ORDER BY received_at ASC").all<Row>()).results ?? [];
+  let rows: Row[];
+  if (opts.limit && opts.limit > 0) {
+    rows = (
+      (await db
+        .prepare("SELECT id, raw_json, received_at FROM webhook_events WHERE posted = 1 ORDER BY received_at DESC LIMIT ?")
+        .bind(opts.limit)
+        .all<Row>()).results ?? []
+    ).reverse();
+  } else {
+    // Full backfill, or a bounded reconcile window when sinceMs/untilMs are given — the defaults
+    // (0 … MAX) span everything, so this one query serves both, always oldest-first.
+    const since = opts.sinceMs ?? 0;
+    const until = opts.untilMs ?? Number.MAX_SAFE_INTEGER;
+    rows =
+      (await db
+        .prepare("SELECT id, raw_json, received_at FROM webhook_events WHERE received_at >= ?1 AND received_at < ?2 ORDER BY received_at ASC")
+        .bind(since, until)
+        .all<Row>()).results ?? [];
+  }
 
   const eventLog = new EventLog(db);
   const seen = new SeenStore(db);
@@ -109,6 +136,7 @@ export async function replayArchivedEvents(
       res.events++;
       res.posted += summary.posted;
       res.merged += summary.merged;
+      res.failed += summary.failed;
     } catch {
       res.errors++;
     }
