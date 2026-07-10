@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { parseWebhookPayload } from "@/lib/meltwater/parse";
-import { redecodeStory } from "@/lib/redecode";
+import { redecodeStory, redecodeRecentStories } from "@/lib/redecode";
 import type { StoryRow } from "@/lib/story";
 import type { NormalizedMention } from "@/lib/meltwater/types";
+import type { Env } from "@/env";
 
 // Meltwater tracking redirects double-encode the real url under `?u=`; mirror parse.test.ts's helper.
 function trackingUrl(target: string): string {
@@ -109,5 +110,41 @@ describe("redecodeStory (redecode.ts)", () => {
     const r = redecodeStory(row);
     expect(r.skipped).toBe(true);
     expect(r.changed).toBe(false);
+  });
+});
+
+// A D1Database stub: updatedSince() reads `.all()`, updateRenderState() calls `.run()`.
+function fakeDB(rows: StoryRow[]) {
+  return {
+    prepare: () => ({
+      bind: () => ({
+        all: async () => ({ results: rows }),
+        run: async () => ({}),
+        first: async () => null,
+      }),
+    }),
+  };
+}
+
+describe("redecodeRecentStories — per-call cap", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("caps chat.update calls per invocation and reports the remainder", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ status: 200, headers: { get: () => null }, json: async () => ({ ok: true, ts: "1.2" }) })),
+    );
+    const rows = Array.from({ length: 45 }, (_, i) => ({
+      ...storyRow(nineDoc, { sourceName: "Jorge Branco", author: null }, "stale"),
+      story_key: "k" + i,
+      slack_ts: "17." + i,
+    }));
+    const env = { DB: fakeDB(rows), SLACK_BOT_TOKEN: "xoxb-test" } as unknown as Env;
+    const res = await redecodeRecentStories(env, { hours: 168, dryRun: false, now: 1_783_674_582_000 });
+    expect(res.changed).toBe(45);
+    expect(res.updated).toBe(40); // MAX_UPDATES_PER_CALL
+    expect(res.remaining).toBe(5);
+    expect(res.failed).toBe(0);
+    expect(fetch).toHaveBeenCalledTimes(40);
   });
 });

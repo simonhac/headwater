@@ -23,10 +23,14 @@ export interface RedecodeResult {
   failed: number; // chat.update calls that failed
   unchanged: number; // re-render identical → left untouched
   skipped: number; // no re-parseable raw payload in the snapshot
+  remaining: number; // changed cards left unsent because the per-call cap was hit — re-run to finish
   changes: RedecodeChange[]; // headline before→after (capped)
 }
 
 const MAX_CHANGES_REPORTED = 200;
+// Cap chat.update calls per invocation to stay under Cloudflare's per-request subrequest limit. Excess
+// changed cards are reported as `remaining`; re-run (it's idempotent) until `remaining` is 0.
+const MAX_UPDATES_PER_CALL = 40;
 
 /**
  * Re-render one story's card under the CURRENT parser + outlets + format, and report whether that
@@ -103,6 +107,7 @@ export async function redecodeRecentStories(
     failed: 0,
     unchanged: 0,
     skipped: 0,
+    remaining: 0,
     changes: [],
   };
 
@@ -119,6 +124,12 @@ export async function redecodeRecentStories(
     res.changed++;
     if (res.changes.length < MAX_CHANGES_REPORTED) res.changes.push({ ts: row.slack_ts, from: r.from, to: r.to });
     if (opts.dryRun) continue;
+    // Per-call cap: once we've made enough Slack calls this request, leave the rest for a re-run rather
+    // than risk hitting the subrequest limit mid-flight. `failed` attempts count too (they still fetch).
+    if (res.updated + res.failed >= MAX_UPDATES_PER_CALL) {
+      res.remaining++;
+      continue;
+    }
 
     const upd = await updateSlack(env, { channel: row.channel, ts: row.slack_ts, attachments: [r.attachment] });
     if (upd.ok) {
