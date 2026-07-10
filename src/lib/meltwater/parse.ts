@@ -1,5 +1,5 @@
 import type { NormalizedMention } from "./types";
-import { deriveOutletName, hostnameOf, mastheadForDomain } from "./outlets";
+import { deriveOutletName, hostnameOf, mastheadForDomain, looksLikePerson } from "./outlets";
 
 /**
  * DEFENSIVE parser. Meltwater's Generic Webhook payload schema is undocumented,
@@ -159,7 +159,7 @@ function firstPublisherUrl(urls: (string | null)[]): string | null {
 }
 
 /** Radio/TV — these carry their own station-resolution path in process.ts, so leave them to it. */
-function isBroadcastMedium(mediaType: string | null): boolean {
+export function isBroadcastMedium(mediaType: string | null): boolean {
   const t = (mediaType ?? "").toLowerCase();
   return t === "radio" || t === "tv" || t === "television";
 }
@@ -211,12 +211,11 @@ function everyMentionToMention(doc: Record<string, Json>, topBrief: string | nul
   if (isBroadcastMedium(mediaType)) {
     outlet = mastheadForDomain(publisherHost); // process.ts refines this into the station name
   } else if (publisherHost) {
-    // Known masthead → authorName is the byline. Otherwise: if authorName already names the domain's
-    // outlet, keep it as the header; if it's unrelated (a journalist/agency), derive the outlet from
-    // the domain and demote authorName to the byline.
-    outlet =
-      mastheadForDomain(publisherHost) ??
-      (authorIsOutlet(rawAuthor, publisherHost) ? null : deriveOutletName(publisherHost));
+    // Known masthead → authorName is the byline. Otherwise recover the outlet from the domain ONLY when
+    // authorName reads like a person; a masthead-like authorName (or one that already names the domain)
+    // is kept as-is rather than mangled into a domain-derived name ("Chelsea Mordialloc Mentone News").
+    const keepAuthor = authorIsOutlet(rawAuthor, publisherHost) || !looksLikePerson(rawAuthor);
+    outlet = mastheadForDomain(publisherHost) ?? (keepAuthor ? null : deriveOutletName(publisherHost));
   } else {
     outlet = null;
   }

@@ -33,7 +33,7 @@ app.get("/health", async (c) => {
   const showConfigDetail = checkKey(c.req.query("key"), c.env.INSPECT_KEY) === "ok";
   return c.json({
     service: "headwater",
-    build: "headwater-4", // bump on each deploy to confirm the running code
+    build: "headwater-5", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     configOk: config.ok,

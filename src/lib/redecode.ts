@@ -1,7 +1,7 @@
 import type { Env } from "@/env";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { SlackAttachment } from "@/lib/slack/format";
-import { parseWebhookPayload } from "@/lib/meltwater/parse";
+import { parseWebhookPayload, isBroadcastMedium } from "@/lib/meltwater/parse";
 import { resolveBrief } from "@/lib/filter/engine";
 import { buildAttachment, attachmentHash } from "@/lib/slack/format";
 import { updateSlack } from "@/lib/slack/post";
@@ -59,14 +59,21 @@ export function redecodeStory(row: StoryRow): {
     const label = oldPrimary.sourceName ?? "";
     return { skipped: true, changed: false, from: label, to: label, newPrimary: oldPrimary, attachment: render(oldPrimary), hash: row.render_hash ?? "" };
   }
-  const attachment = render(reparsed);
+  // Broadcast station names come from process.ts's live station-code resolution (network + D1 cache),
+  // which a pure re-parse can't reproduce — so keep the stored station header + reporter byline and only
+  // re-render body/format changes. Otherwise a resolved station ("4BC 1116 News Talk") would regress to
+  // the raw reporter name ("Ben Davis") that the parser falls back to.
+  const newPrimary = isBroadcastMedium(reparsed.mediaType)
+    ? { ...reparsed, sourceName: oldPrimary.sourceName, author: oldPrimary.author, outletUrl: oldPrimary.outletUrl }
+    : reparsed;
+  const attachment = render(newPrimary);
   const hash = attachmentHash(attachment);
   return {
     skipped: false,
     changed: row.render_hash !== hash,
     from: oldPrimary.sourceName ?? "",
-    to: reparsed.sourceName ?? "",
-    newPrimary: reparsed,
+    to: newPrimary.sourceName ?? "",
+    newPrimary,
     attachment,
     hash,
   };

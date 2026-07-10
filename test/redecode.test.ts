@@ -85,6 +85,22 @@ describe("redecodeStory (redecode.ts)", () => {
     expect(r.attachment.text).toContain("(also mentions `Andrew Wilkie` `Allegra Spender` `MP`)");
   });
 
+  it("preserves a broadcast station header instead of regressing to the reporter byline", () => {
+    // Radio: links.source is only a Meltwater host, so a pure re-parse falls back to the reporter
+    // (authorName). The station name was resolved live in process.ts and stored — keep it.
+    const radioDoc = {
+      providerType: "tveyes_radio",
+      statusLine: "🔊 1.1M Reach",
+      source: "MPs",
+      authorName: "Ben Davis",
+      links: { source: trackingUrl("https://transition.meltwater.com/paywall/redirect/xyz") },
+    };
+    const r = redecodeStory(storyRow(radioDoc, { sourceName: "4BC 1116 News Talk", author: "Ben Davis" }));
+    expect(r.to).toBe("4BC 1116 News Talk"); // NOT "Ben Davis"
+    expect(r.newPrimary.sourceName).toBe("4BC 1116 News Talk");
+    expect(r.newPrimary.author).toBe("Ben Davis");
+  });
+
   it("skips a story whose snapshot has no re-parseable raw payload", () => {
     const row = storyRow(nineDoc);
     const primary = JSON.parse(row.primary_mention_json) as Record<string, unknown>;

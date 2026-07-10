@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseWebhookPayload } from "@/lib/meltwater/parse";
-import { mastheadForDomain, hostnameOf, deriveOutletName } from "@/lib/meltwater/outlets";
+import { mastheadForDomain, hostnameOf, deriveOutletName, looksLikePerson } from "@/lib/meltwater/outlets";
 import { docIdFromLinks } from "@/lib/meltwater/station-resolve";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 
@@ -225,6 +225,23 @@ describe("deriveOutletName (outlets.ts)", () => {
   });
 });
 
+describe("looksLikePerson (outlets.ts)", () => {
+  it("accepts 2–3 capitalised words with no outlet word (incl. O'/hyphenated surnames)", () => {
+    expect(looksLikePerson("Jorge Branco")).toBe(true);
+    expect(looksLikePerson("Lucinda Garbutt-Young")).toBe(true);
+    expect(looksLikePerson("Jim O'Rourke")).toBe(true);
+  });
+
+  it("rejects masthead-like names (outlet words, 'The', 4+ words, all-caps)", () => {
+    expect(looksLikePerson("Chelsea Mordialloc Mentone News")).toBe(false); // 4 words + 'News'
+    expect(looksLikePerson("The Sentinel")).toBe(false); // leading 'The'
+    expect(looksLikePerson("News of the Midlands")).toBe(false);
+    expect(looksLikePerson("ABC")).toBe(false); // single all-caps token
+    expect(looksLikePerson("Transparency International Australia")).toBe(false); // 'Australia'
+    expect(looksLikePerson(null)).toBe(false);
+  });
+});
+
 describe("parseWebhookPayload — outlet recovery from the publisher domain (real cases)", () => {
   // These mirror three production items where authorName is the journalist, not the outlet.
   it("maps nine.com.au → 9News, moving the reporter to Author", () => {
@@ -255,6 +272,44 @@ describe("parseWebhookPayload — outlet recovery from the publisher domain (rea
     });
     expect(m!.sourceName).toBe("The Australian Jewish News");
     expect(m!.author).toBe("Gareth Narunsky");
+  });
+
+  it("keeps a masthead-like authorName instead of deriving an ugly name from the domain", () => {
+    // baysidenews.com.au isn't in the table; authorName is a masthead, not a person → keep it as-is
+    // (regression from the dry-run: "Chelsea Mordialloc Mentone News" was mangled to "Baysidenews").
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 5k Reach",
+      source: "MPs",
+      authorName: "Chelsea Mordialloc Mentone News",
+      links: { source: trackingUrl("https://www.baysidenews.com.au/a") },
+    });
+    expect(m!.sourceName).toBe("Chelsea Mordialloc Mentone News");
+    expect(m!.author).toBeNull();
+  });
+
+  it("maps a journalist byline on a newly-listed masthead (themercury.com.au → The Mercury)", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 200k Reach",
+      source: "MPs",
+      authorName: "Jared Lynch",
+      links: { source: trackingUrl("https://www.themercury.com.au/a") },
+    });
+    expect(m!.sourceName).toBe("The Mercury");
+    expect(m!.author).toBe("Jared Lynch");
+  });
+
+  it("labels a party media release from liberal.org.au", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 10k Reach",
+      source: "MPs",
+      authorName: "Angus Taylor",
+      links: { source: trackingUrl("https://www.liberal.org.au/a") },
+    });
+    expect(m!.sourceName).toBe("Liberal Party Media Release");
+    expect(m!.author).toBe("Angus Taylor");
   });
 
   it("falls back to the article link's domain when links.source is a Meltwater host", () => {
