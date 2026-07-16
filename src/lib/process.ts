@@ -9,7 +9,11 @@ import { postToSlack, updateSlack } from "@/lib/slack/post";
 import { StoryStore, storyKey, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 import { simhash64, hammingDistance } from "@/lib/simhash";
-import { resolveStationNameLive } from "@/lib/meltwater/station-resolve";
+import { stationCodeFor, viewerUrlForRaw } from "@/lib/meltwater/station-resolve";
+import { stationNameForCode, upsertStationName } from "@/lib/meltwater/stations";
+import { looksLikePerson } from "@/lib/meltwater/outlets";
+import { broadcastMediumLabel } from "@/lib/slack/format";
+import { enqueueStationRender } from "@/do/client";
 import { decide } from "@/lib/decide";
 import { sha256Hex } from "@/lib/ids";
 
@@ -54,14 +58,46 @@ const outletOf = (m: NormalizedMention): Outlet => ({
   reach: m.reach,
 });
 
-/** Resolve a broadcast item's station (cached; a cold miss hits Browser Rendering) and prefer it as
- * the outlet, demoting any reporter in `sourceName` to the byline. No-op when nothing resolves. */
+/**
+ * Resolve a broadcast item's station WITHOUT rendering (rendering is deferred to the StationRenderer
+ * DO, which drains serially under the free-tier limits). In order:
+ *   1. D1 code→name cache — a station named earlier by any means wins.
+ *   2. authorName-trust — a station-like header IS the station; keep it and seed the map so every
+ *      future item of this station (and the redecode backfill) resolves for free, render-free.
+ *   3. otherwise it's a presenter's name → don't show a person as the outlet: move them to the byline,
+ *      show a neutral medium masthead, and enqueue the code for the background renderer.
+ * Best-effort; a resolution failure just leaves the safety-net card, never throws into the pipeline.
+ */
 async function resolveBroadcastOutlet(env: Env, mention: NormalizedMention, now: number): Promise<void> {
-  const station = await resolveStationNameLive(env, mention.raw, now);
-  if (station && station.toLowerCase() !== (mention.sourceName ?? "").toLowerCase()) {
-    if (!mention.author && mention.sourceName) mention.author = mention.sourceName;
-    mention.sourceName = station;
+  const codeInfo = await stationCodeFor(env, mention.raw); // {docId, code} | null (caches docId→code)
+  const code = codeInfo?.code ?? null;
+
+  // 1. Known station → promote it, demoting any presenter currently in the header to the byline.
+  const known = code ? await stationNameForCode(env.DB, code) : null;
+  if (known) {
+    promoteStation(mention, known);
+    return;
   }
+
+  // 2. Station-like header → trust it and seed the map (burst-proof; no browser; 0 render attempts).
+  const header = mention.sourceName?.trim() || null;
+  if (header && !looksLikePerson(header)) {
+    if (code) await upsertStationName(env.DB, code, header, now, 0);
+    return;
+  }
+
+  // 3. A presenter's name with no known station → safety net + queue the code for the serial renderer.
+  if (header && !mention.author) mention.author = header;
+  mention.sourceName = broadcastMediumLabel(mention.mediaType);
+  const url = viewerUrlForRaw(mention.raw);
+  if (code && url) await enqueueStationRender(env, code, url);
+}
+
+/** Promote a resolved station to the masthead, demoting any presenter currently there to the byline. */
+function promoteStation(mention: NormalizedMention, station: string): void {
+  if (station.toLowerCase() === (mention.sourceName ?? "").toLowerCase()) return;
+  if (!mention.author && mention.sourceName) mention.author = mention.sourceName;
+  mention.sourceName = station;
 }
 
 /** Closest recent broadcast story whose transcript SimHash is within the configured Hamming distance. */

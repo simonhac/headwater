@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "@/env";
 import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
@@ -6,6 +7,10 @@ import { processEvent } from "@/lib/process";
 import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
+import { pokeStationRender, getRenderState } from "@/do/client";
+import { backfillStations } from "@/lib/backfill";
+import { listStationResolutions } from "@/lib/meltwater/stations";
+import { renderStationsPage } from "@/ui/stations";
 import { accessOk, checkBearer } from "@/lib/auth";
 import { withRetry } from "@/lib/retry";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
@@ -29,6 +34,10 @@ const RECONCILE_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 /** Don't reconcile events newer than this — let the live `waitUntil` path settle first so the cron
  * never races in-flight processing (a fresh straggler just heals on a later tick). */
 const RECONCILE_SETTLE_MS = 15 * 60 * 1000;
+/** Hourly healer look-back (NOT a cadence): re-render stories touched in this window so a station
+ * named since the card posted (by the drainer / authorName-trust) upgrades in place. Hash-gated, so a
+ * card that didn't change is never re-sent to Slack. Matches the reconcile/syndication window. */
+const HEAL_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 /** Ingestion archive-write backoff (ms): 3 attempts total before returning 5xx. */
 const ARCHIVE_RETRY_BACKOFFS_MS = [50, 150];
 
@@ -50,6 +59,22 @@ async function reconcile(env: Env): Promise<void> {
   if (res.posted || res.merged || res.failed || res.errors) {
     console.warn(
       `[reconcile] events=${res.events} healed_posted=${res.posted} healed_merged=${res.merged} still_failed=${res.failed} errors=${res.errors}`,
+    );
+  }
+}
+
+/**
+ * Hourly card healer. Re-renders stories touched in the last HEAL_LOOKBACK_MS under the current
+ * decoding and chat.updates only the ones whose rendering changed — i.e. broadcast cards whose station
+ * was named (by the serial renderer or authorName-trust) after the card first posted. Hash-gated
+ * (`render_hash`), so unchanged cards are never re-sent. Gated on posting, like /admin/redecode.
+ */
+async function heal(env: Env): Promise<void> {
+  if (env.POSTING_ENABLED !== "true") return;
+  const res = await redecodeRecentStories(env, { hours: HEAL_LOOKBACK_MS / 3_600_000, dryRun: false, now: Date.now() });
+  if (res.updated || res.failed || res.remaining) {
+    console.warn(
+      `[heal] scanned=${res.scanned} changed=${res.changed} updated=${res.updated} failed=${res.failed} remaining=${res.remaining}`,
     );
   }
 }
@@ -198,6 +223,21 @@ app.get("/admin/render-station", async (c) => {
   return c.json({ title, station: title ? (title.split(" - ")[0]?.trim() ?? null) : null });
 });
 
+// --- admin: one-time warm start — re-scan the archive, seed station_names from station-like
+// authorNames and enqueue still-unnamed broadcast codes for the serial renderer. Gated by REPLAY_KEY.
+// `limit` caps events scanned (newest first); re-runnable (dedupe is by code). ---
+app.post("/admin/backfill-stations", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const limit = Math.min(Number(c.req.query("limit")) || 1000, 5000);
+  try {
+    return c.json(await backfillStations(c.env, { limit }));
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
 // --- admin: run the ingestion heartbeat on demand (same check the cron runs); gated by REPLAY_KEY ---
 app.get("/admin/heartbeat", async (c) => {
   const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
@@ -205,6 +245,19 @@ app.get("/admin/heartbeat", async (c) => {
   if (gate === "denied") return c.text("forbidden", 403);
   return c.json(await runHeartbeat(c.env, Date.now()));
 });
+
+// --- broadcast station-code resolution status (gated by Cloudflare Access). Mounted at BOTH /stations
+// and /inspect/stations: the latter falls under the existing `/inspect` Access destination, so it works
+// without adding a new destination; /stations needs its own destination (Zero Trust → Access). ---
+const stationsPage = async (c: Context<{ Bindings: Env }>) => {
+  if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
+  const [rows, state] = await Promise.all([listStationResolutions(c.env.DB), getRenderState(c.env)]);
+  // Viewing the status also nudges the drainer — a refresh can pull a budget-deferred alarm earlier.
+  c.executionCtx.waitUntil(pokeStationRender(c.env).catch(() => {}));
+  return c.html(renderStationsPage(rows, state));
+};
+app.get("/stations", stationsPage);
+app.get("/inspect/stations", stationsPage);
 
 app.get("/inspect", async (c) => {
   if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
@@ -226,13 +279,23 @@ app.get("/inspect", async (c) => {
 //   "*/15 * * * *" → self-healing reconcile;  "0 * * * *" → hourly ingestion heartbeat.
 // (At the top of the hour both fire — Cloudflare invokes scheduled() once per matching cron.)
 // Never throw out of scheduled() — a rejected cron just retries noisily; each job self-reports.
+export { StationRenderer } from "@/do/stationRenderer";
+
 export default {
   fetch: app.fetch,
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     if (controller.cron === "0 * * * *") {
       ctx.waitUntil(runHeartbeat(env, Date.now()).catch(() => {}));
+      ctx.waitUntil(heal(env).catch((e) => console.error(`[heal] failed: ${String(e)}`)));
     } else {
-      ctx.waitUntil(reconcile(env).catch((e) => console.error(`[reconcile] failed: ${String(e)}`)));
+      // Reconcile, THEN backstop the drainer (in case an enqueue's poke was lost). One waitUntil so
+      // both run to completion within the request — poke on an empty queue is a no-op (no stray alarm).
+      ctx.waitUntil(
+        reconcile(env)
+          .catch((e) => console.error(`[reconcile] failed: ${String(e)}`))
+          .then(() => pokeStationRender(env))
+          .catch(() => {}),
+      );
     }
   },
 } satisfies ExportedHandler<Env>;

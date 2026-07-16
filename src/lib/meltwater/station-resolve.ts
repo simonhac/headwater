@@ -1,6 +1,7 @@
 import type { Env } from "@/env";
+import type { Page } from "@cloudflare/puppeteer";
 import puppeteer from "@cloudflare/puppeteer";
-import { stationNameForCode, upsertStationName } from "./stations";
+import { stationNameForCode } from "./stations";
 
 type Links = { article?: unknown; source?: unknown } | null | undefined;
 
@@ -18,6 +19,11 @@ function unwrapU(t: unknown): string | null {
 /** The best link to follow to the broadcast viewer (article first, then source), unwrapped. */
 function viewerUrl(links: Links): string | null {
   return unwrapU(links?.article) ?? unwrapU(links?.source);
+}
+
+/** The unwrapped viewer/transition URL to render for a raw webhook doc — what the drainer enqueues. */
+export function viewerUrlForRaw(raw: unknown): string | null {
+  return viewerUrl((raw as { links?: unknown } | null)?.links as Links);
 }
 
 /** Meltwater document id from a `.../paywall/redirect/<docId>` transition link. */
@@ -43,8 +49,9 @@ async function fetchStationCode(transitionUrl: string): Promise<string | null> {
   }
 }
 
-/** Resolve the Meltwater numeric broadcast code for an item (cached in D1 by docId; fetched on miss). */
-async function stationCodeFor(env: Env, raw: unknown): Promise<{ docId: string; code: string | null } | null> {
+/** Resolve the Meltwater numeric broadcast code for an item (cached in D1 by docId; fetched on miss).
+ * Browser-free — used by ingestion (authorName-trust / cache), the redecode backfill, and enqueue. */
+export async function stationCodeFor(env: Env, raw: unknown): Promise<{ docId: string; code: string | null } | null> {
   const links = (raw as { links?: unknown } | null)?.links as Links;
   const docId = docIdFromLinks(links);
   if (!docId) return null;
@@ -64,48 +71,49 @@ async function stationCodeFor(env: Env, raw: unknown): Promise<{ docId: string; 
 
 /**
  * Station name from the D1 `station_names` map only (no browser) — the numeric code is cached in D1 by
- * docId, so this is cheap and safe to call from the redecode backfill. Returns null for an unknown code.
+ * docId, so this is cheap and safe to call from the ingestion path and the redecode backfill. Returns
+ * null for an unknown code (which the caller resolves via authorName-trust or the deferred renderer).
  */
 export async function resolveStationName(env: Env, raw: unknown): Promise<string | null> {
   const c = await stationCodeFor(env, raw);
   return c ? stationNameForCode(env.DB, c.code) : null;
 }
 
-/**
- * Ingestion-time resolution: the D1 map first; on a miss (a station we've never named) render the JS
- * viewer with a fresh token to discover the name and cache it by code — so every later item of that
- * station resolves for free, without a browser.
- */
-export async function resolveStationNameLive(env: Env, raw: unknown, now: number): Promise<string | null> {
-  const c = await stationCodeFor(env, raw);
-  if (!c) return null;
-  const known = await stationNameForCode(env.DB, c.code);
-  if (known) return known;
-  if (!c.code) return null; // no code to key a discovered name on
-
-  const name = await renderStationName(env, raw);
-  if (name) await upsertStationName(env.DB, c.code, name, now);
-  return name;
-}
-
-/**
- * Render the Meltwater broadcast viewer (a client-rendered SPA that curl can't read) via Cloudflare
- * Browser Rendering and read the station name from the page title — "702 ABC Sydney - <program> -
- * <time>" → "702 ABC Sydney". Best-effort: returns null on any failure or an expired token.
- */
-export async function renderStationName(env: Env, raw: unknown): Promise<string | null> {
-  const target = viewerUrl((raw as { links?: unknown } | null)?.links as Links);
-  if (!target) return null;
-  const title = await renderViewerTitle(env, target);
+/** Station name from a rendered viewer title — "702 ABC Sydney - <program> - <time>" → "702 ABC
+ * Sydney". Null for the pre-load placeholder or an unparseable title. */
+export function stationNameFromTitle(title: string | null): string | null {
   const name = title?.split(" - ")[0]?.trim() ?? "";
   return name && name !== "Broadcast player" ? name : null;
 }
 
 /**
- * Load a URL in Cloudflare Browser Rendering and return its final page title. The Meltwater viewer is
- * a client-rendered SPA that redirects transition → mediaView → segment and only then sets a
- * "<Station> - <program> - <time>" title, so we poll until it settles. Best-effort; null on failure or
- * a missing binding. Exported for the /admin/render-station verify endpoint.
+ * Navigate an ALREADY-OPEN page to a Meltwater viewer URL and return its settled title. The viewer is
+ * a client-rendered SPA that redirects transition → mediaView → segment and only sets a
+ * "<Station> - <program> - <time>" title after a further in-SPA hop, so we wait on the title PATTERN
+ * (two " - " separators) rather than a fixed delay — the old fixed ~9.6s poll returned before that
+ * last hop under a cold headless browser. Best-effort: returns whatever title is present if the wait
+ * times out. Exported so the serial renderer (StationRenderer DO) can reuse one warm browser across
+ * many URLs instead of launching one per URL.
+ */
+export async function renderTitleOnPage(page: Page, url: string): Promise<string | null> {
+  await page.goto(url, { waitUntil: "load", timeout: 15000 });
+  // A string expression (not a closure) so it evaluates in the PAGE context — `document` is the
+  // browser's, not the Worker's (which has no DOM). Waits for "<Station> - <program> - <time>". A
+  // resolvable viewer settles in ~1-2s, so a 10s cap keeps a FAILED render cheap (it counts against
+  // the daily browser-time budget) without cutting off a slow-but-valid one.
+  await page
+    .waitForFunction(
+      "!!document.title && document.title !== 'Broadcast player' && / - .+ - /.test(document.title)",
+      { timeout: 10000, polling: 250 },
+    )
+    .catch(() => {}); // timed out → fall through and read whatever title is set
+  return (await page.title().catch(() => "")) || null;
+}
+
+/**
+ * Single-shot render: launch ONE browser, render a viewer URL, disconnect. Used by the
+ * `/admin/render-station` verify endpoint. Ingestion never renders inline anymore (the StationRenderer
+ * DO owns all rendering, serially, on a reused browser). Null on a missing binding or any failure.
  */
 export async function renderViewerTitle(env: Env, url: string): Promise<string | null> {
   if (!env.BROWSER) return null; // no Browser Rendering binding (e.g. tests) → skip
@@ -113,14 +121,7 @@ export async function renderViewerTitle(env: Env, url: string): Promise<string |
   try {
     browser = await puppeteer.launch(env.BROWSER);
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-    let title = "";
-    for (let i = 0; i < 8; i++) {
-      await new Promise((r) => setTimeout(r, 1200));
-      title = (await page.title().catch(() => "")) || "";
-      if (title && title !== "Broadcast player" && title.includes(" - ")) break;
-    }
-    return title || null;
+    return await renderTitleOnPage(page, url);
   } catch {
     return null;
   } finally {

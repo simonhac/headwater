@@ -119,6 +119,23 @@ describe("resolveBroadcast (redecode.ts)", () => {
     expect(kept.sourceName).toBe("4BC 1116 News Talk");
     expect(kept.author).toBe("Ben Davis");
   });
+
+  it("keeps a station-like authorName header when no station resolves (authorName-trust)", () => {
+    const stationDoc = { ...radioDoc, authorName: "666 ABC Canberra" };
+    const { oldPrimary, reparsed } = reparseStory(storyRow(stationDoc));
+    expect(reparsed!.sourceName).toBe("666 ABC Canberra"); // parse keeps the station-like authorName
+    const out = resolveBroadcast(reparsed!, oldPrimary, null);
+    expect(out.sourceName).toBe("666 ABC Canberra"); // trusted as the outlet, no safety net
+    expect(out.author).toBeNull();
+  });
+
+  it("applies the safety net when a presenter header has no resolved station (never a person as outlet)", () => {
+    // oldPrimary is itself the presenter (the stuck-bug snapshot) → neutral masthead + presenter byline.
+    const { oldPrimary, reparsed } = reparseStory(storyRow(radioDoc, { sourceName: "Ben Davis", author: null }));
+    const out = resolveBroadcast(reparsed!, oldPrimary, null);
+    expect(out.sourceName).toBe("Radio");
+    expect(out.author).toBe("Ben Davis");
+  });
 });
 
 // A D1Database stub: updatedSince() reads `.all()`, updateRenderState() calls `.run()`.

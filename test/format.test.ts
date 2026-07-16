@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildAttachment, buildPostPayload } from "@/lib/slack/format";
+import { buildAttachment, buildPostPayload, broadcastMediumLabel } from "@/lib/slack/format";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { BriefRule } from "@/config/feed.config";
 
@@ -187,6 +187,33 @@ describe("buildAttachment — fields (Author | Organisation Brief)", () => {
     const a = buildAttachment(mention({ author: "A & B" }), { ...brief, label: "R&D <team>" });
     expect(a.fields?.find((f) => f.title === "Author")?.value).toBe("A &amp; B");
     expect(a.fields?.find((f) => f.title === "Organisation Brief")?.value).toBe("R&amp;D &lt;team&gt;");
+  });
+});
+
+describe("broadcast safety net (unresolved station never shows a person as the outlet)", () => {
+  it("maps broadcast media types to a neutral masthead label", () => {
+    expect(broadcastMediumLabel("radio")).toBe("Radio");
+    expect(broadcastMediumLabel("tv")).toBe("TV");
+    expect(broadcastMediumLabel("television")).toBe("TV");
+    expect(broadcastMediumLabel(null)).toBe("Radio");
+  });
+
+  it("keeps the presenter in the Author byline under a neutral masthead (Zann Maxwell case)", () => {
+    const a = buildAttachment(
+      mention({ sourceName: "Radio", title: "Evenings with Renee Krosch", author: "Zann Maxwell", mediaType: "radio", url: null, outletUrl: null }),
+      brief,
+    );
+    expect(a.author_name).toBe("📻 Radio"); // medium, not the person
+    expect(a.fields?.find((f) => f.title === "Author")?.value).toBe("Zann Maxwell");
+  });
+
+  it("drops the Author byline when it just repeats the headline (host-named show, Tom Elliott case)", () => {
+    const a = buildAttachment(
+      mention({ sourceName: "Radio", title: "Tom Elliott", author: "Tom Elliott", mediaType: "radio", url: null, outletUrl: null }),
+      brief,
+    );
+    expect(a.author_name).toBe("📻 Radio");
+    expect(a.fields?.some((f) => f.title === "Author")).toBe(false); // no "Tom Elliott" twice
   });
 });
 

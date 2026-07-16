@@ -157,6 +157,16 @@ export function briefColor(brief: BriefRule): string {
   return brief.color ?? DEFAULT_BRIEF_COLOR;
 }
 
+/**
+ * Neutral outlet label for a broadcast item whose station couldn't be resolved — so a presenter's
+ * name never sits in the masthead slot. The program/host stays the headline; this is just the
+ * medium ("Radio"/"TV").
+ */
+export function broadcastMediumLabel(mediaType: string | null): string {
+  const t = (mediaType ?? "").toLowerCase();
+  return t.includes("tv") || t.includes("television") ? "TV" : "Radio";
+}
+
 /** Case- and whitespace-insensitive equality — for spotting a title that just repeats the masthead. */
 export function sameText(a: string, b: string): boolean {
   const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
@@ -205,9 +215,13 @@ export function buildAttachment(
     text = buildMentionsLine(fullText, kws) ?? undefined;
   }
 
-  // Author | Organisation Brief columns
+  // Author | Organisation Brief columns. Skip the Author byline when it just repeats the headline or
+  // the masthead — happens for a host-named broadcast show (a "Tom Elliott" segment) where the
+  // presenter already appears as the title/heading and the masthead is the neutral medium label.
   const fields: { title: string; value: string; short: boolean }[] = [];
-  if (m.author) fields.push({ title: "Author", value: escapeMrkdwn(m.author), short: true });
+  if (m.author && !sameText(m.author, title) && !sameText(m.author, masthead)) {
+    fields.push({ title: "Author", value: escapeMrkdwn(m.author), short: true });
+  }
   fields.push({ title: "Organisation Brief", value: escapeMrkdwn(brief.label), short: true });
 
   // footer: date · media type · sentiment · reach (+ "also matched …" and "Also in: …"). Plain

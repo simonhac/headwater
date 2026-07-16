@@ -1,12 +1,18 @@
 import type { BrowserWorker } from "@cloudflare/puppeteer";
+import type { StationRenderer } from "@/do/stationRenderer";
 
 export interface Env {
   /** D1 database — webhook_events + seen_mentions (see migrations/). */
   DB: D1Database;
 
   /** Cloudflare Browser Rendering binding — resolves broadcast station names from the JS viewer.
-   * Optional so tests/pool envs without the binding type-check; renderStationName no-ops when absent. */
+   * Optional so tests/pool envs without the binding type-check; renderViewerTitle no-ops when absent. */
   BROWSER?: BrowserWorker;
+
+  /** Serial broadcast-station render drainer (Durable Object). The only place a browser is launched;
+   * one account-wide instance serializes renders under the free-tier limits. Optional so unit tests
+   * without the binding type-check (enqueue/poke no-op when absent). */
+  STATION_RENDERER?: DurableObjectNamespace<StationRenderer>;
 
   // --- non-secret vars (wrangler.jsonc) ---
   /** "true" to actually post to Slack. Stays "false" until the payload is confirmed + a bot token is wired. */

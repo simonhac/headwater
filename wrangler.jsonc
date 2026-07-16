@@ -11,10 +11,17 @@
     "enabled": true
   },
   // Cloudflare Browser Rendering — headless Chromium used to resolve broadcast station names from the
-  // JS-rendered Meltwater viewer. Called at most once per new station code, then cached in D1.
+  // JS-rendered Meltwater viewer. Launched ONLY by the StationRenderer DO (serially, one reused
+  // browser per drain) to stay under the free-tier "1 new browser / 20s" + "10 min/day" limits.
   "browser": {
     "binding": "BROWSER"
   },
+  // Serial station-render drainer. One account-wide instance (single-threaded ⇒ a mutex) turns bursts
+  // of syndicated radio into one warm, serial render pass. SQLite-backed so it works on the free plan.
+  "durable_objects": {
+    "bindings": [{ "name": "STATION_RENDERER", "class_name": "StationRenderer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StationRenderer"] }],
   "vars": {
     // Non-secret config. Secrets — and the deployment-specific ACCESS_TEAM_DOMAIN / ACCESS_AUD —
     // live in .dev.vars (local) and `wrangler secret put` (prod), so this public repo carries no

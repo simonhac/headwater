@@ -2,8 +2,9 @@ import type { Env } from "@/env";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { SlackAttachment } from "@/lib/slack/format";
 import { parseWebhookPayload, isBroadcastMedium } from "@/lib/meltwater/parse";
+import { looksLikePerson } from "@/lib/meltwater/outlets";
 import { resolveBrief } from "@/lib/filter/engine";
-import { buildAttachment, attachmentHash } from "@/lib/slack/format";
+import { buildAttachment, attachmentHash, broadcastMediumLabel, sameText } from "@/lib/slack/format";
 import { updateSlack } from "@/lib/slack/post";
 import { resolveStationName } from "@/lib/meltwater/station-resolve";
 import { StoryStore, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
@@ -45,9 +46,13 @@ export function reparseStory(row: StoryRow): { oldPrimary: NormalizedMention; re
 }
 
 /**
- * Pure: given a broadcast station name resolved from D1 (or null), decide the headline. A resolved
- * station becomes the header and the reporter drops to the byline; otherwise keep the stored header so
- * a card never regresses from a real station to the raw reporter name.
+ * Pure: given a broadcast station name resolved from D1 (or null), decide the headline. Mirrors
+ * ingestion (`process.ts:resolveBroadcastOutlet`) so a re-rendered card matches what a fresh one
+ * would be:
+ *   1. A station named in D1 wins — it becomes the header, the reporter drops to the byline.
+ *   2. Else a station-like header (authorName-trust) is itself the station — keep it.
+ *   3. Else never regress a card that already showed a real (non-person) station back to the reporter.
+ *   4. Else it's a presenter's name with no known station → safety net: neutral masthead, byline.
  */
 export function resolveBroadcast(
   reparsed: NormalizedMention,
@@ -58,7 +63,15 @@ export function resolveBroadcast(
     const demote = reparsed.sourceName && reparsed.sourceName.toLowerCase() !== station.toLowerCase();
     return { ...reparsed, sourceName: station, author: reparsed.author ?? (demote ? reparsed.sourceName : null) };
   }
-  return { ...reparsed, sourceName: oldPrimary.sourceName, author: oldPrimary.author, outletUrl: oldPrimary.outletUrl };
+  if (reparsed.sourceName && !looksLikePerson(reparsed.sourceName)) return reparsed;
+  if (
+    oldPrimary.sourceName &&
+    !looksLikePerson(oldPrimary.sourceName) &&
+    !sameText(oldPrimary.sourceName, reparsed.sourceName ?? "")
+  ) {
+    return { ...reparsed, sourceName: oldPrimary.sourceName, author: oldPrimary.author ?? reparsed.sourceName, outletUrl: oldPrimary.outletUrl };
+  }
+  return { ...reparsed, author: reparsed.author ?? reparsed.sourceName, sourceName: broadcastMediumLabel(reparsed.mediaType) };
 }
 
 /**

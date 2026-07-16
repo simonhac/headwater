@@ -163,7 +163,7 @@ export function renderInspectPage(events: WebhookEventRecord[], keyQS: string, p
 <style>${INSPECT_CSS}</style></head><body>
 <header class="topbar">
   <h1>Headwater — webhook feed</h1>
-  <nav>${filterNav}<a href="${refreshHref}">↻ refresh</a> · <a href="${rawHref}">raw JSON</a></nav>
+  <nav>${filterNav}<a href="${refreshHref}">↻ refresh</a> · <a href="/inspect/stations">stations</a> · <a href="${rawHref}">raw JSON</a></nav>
 </header>
 <main class="stream">${stream}</main>
 <script>
