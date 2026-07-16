@@ -1,4 +1,5 @@
 import type { StationResolution } from "@/lib/meltwater/stations";
+import type { RenderState } from "@/do/stationRenderer";
 import { escHtml } from "./card";
 
 // Wall-clock in the feed's home timezone (matches inspect.ts / format.ts HOME_FMT).
@@ -40,6 +41,9 @@ tr.pending td.name { color: #b45309; font-weight: 500; }
 .pill.ok { background: #16a34a22; color: #16a34a; }
 .pill.wait { background: #d9770622; color: #d97706; }
 .stat { color: #8a8a8a; }
+.renderer { padding: 8px 20px; font-size: 12.5px; color: #8a8a8a; border-bottom: 1px solid #8882; }
+.renderer b { color: inherit; font-weight: 600; }
+.warn { color: #d97706; font-weight: 600; }
 .empty { padding: 32px; text-align: center; color: #9a9a9a; }
 `;
 
@@ -67,8 +71,33 @@ function row(r: StationResolution): string {
   </tr>`;
 }
 
+/** Relative time label, e.g. "3m ago" / "in 12s" / "—". */
+function rel(ms: number | null, now: number): string {
+  if (ms == null) return "—";
+  const d = ms - now;
+  const a = Math.abs(d);
+  const s = a < 60_000 ? `${Math.round(a / 1000)}s` : a < 3_600_000 ? `${Math.round(a / 60_000)}m` : `${(a / 3_600_000).toFixed(1)}h`;
+  return d < 0 ? `${s} ago` : `in ${s}`;
+}
+
+/** One-line drainer status: queue depth, daily browser-time budget, last launch, next drain. */
+function renderStatus(s: RenderState): string {
+  const used = Math.round(s.budgetUsedMs / 1000);
+  const cap = Math.round(s.budgetCapMs / 1000);
+  const pct = s.budgetCapMs ? Math.round((100 * s.budgetUsedMs) / s.budgetCapMs) : 0;
+  const budget = `<span${s.budgetUsedMs >= s.budgetCapMs ? ' class="warn"' : ""}>${used}s / ${cap}s today (${pct}%)</span>`;
+  const maxed = s.queuedTotal - s.queued;
+  const maxedBit = maxed > 0 ? ` <span class="warn">+${maxed} maxed-out</span>` : "";
+  const drain = s.alarmAt == null ? "idle" : rel(s.alarmAt, s.now);
+  const noBrowser = s.hasBrowser ? "" : ' · <span class="warn">no BROWSER binding</span>';
+  const backoff = s.launchBlockedUntil
+    ? ` · <span class="warn">rate-limited (${s.launchFailures}× launch fails) — retry ${rel(s.launchBlockedUntil, s.now)}</span>`
+    : "";
+  return `<div class="renderer"><b>renderer:</b> ${s.queued} queued${maxedBit} · browser ${budget} · last launch ${rel(s.lastLaunchAt, s.now)} · next drain ${drain}${backoff}${noBrowser}</div>`;
+}
+
 /** Station-resolution status table — one row per broadcast code we've seen, oldest first. */
-export function renderStationsPage(rows: StationResolution[]): string {
+export function renderStationsPage(rows: StationResolution[], state: RenderState | null = null): string {
   const resolved = rows.filter((r) => r.name).length;
   const pending = rows.length - resolved;
   const body = rows.length
@@ -82,6 +111,7 @@ export function renderStationsPage(rows: StationResolution[]): string {
   <h1>Headwater — broadcast station resolution</h1>
   <nav><span class="stat">${rows.length} codes · ${resolved} resolved · ${pending} pending</span> · <a href="/inspect/stations">↻ refresh</a> · <a href="/inspect">‹ inspect</a></nav>
 </header>
+${state ? renderStatus(state) : ""}
 <main>
 <table>
   <thead><tr>

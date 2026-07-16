@@ -96,13 +96,15 @@ export function stationNameFromTitle(title: string | null): string | null {
  * many URLs instead of launching one per URL.
  */
 export async function renderTitleOnPage(page: Page, url: string): Promise<string | null> {
-  await page.goto(url, { waitUntil: "load", timeout: 20000 });
+  await page.goto(url, { waitUntil: "load", timeout: 15000 });
   // A string expression (not a closure) so it evaluates in the PAGE context — `document` is the
-  // browser's, not the Worker's (which has no DOM). Waits for "<Station> - <program> - <time>".
+  // browser's, not the Worker's (which has no DOM). Waits for "<Station> - <program> - <time>". A
+  // resolvable viewer settles in ~1-2s, so a 10s cap keeps a FAILED render cheap (it counts against
+  // the daily browser-time budget) without cutting off a slow-but-valid one.
   await page
     .waitForFunction(
       "!!document.title && document.title !== 'Broadcast player' && / - .+ - /.test(document.title)",
-      { timeout: 25000, polling: 250 },
+      { timeout: 10000, polling: 250 },
     )
     .catch(() => {}); // timed out → fall through and read whatever title is set
   return (await page.title().catch(() => "")) || null;

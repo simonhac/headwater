@@ -7,7 +7,7 @@ import { processEvent } from "@/lib/process";
 import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
-import { pokeStationRender } from "@/do/client";
+import { pokeStationRender, getRenderState } from "@/do/client";
 import { backfillStations } from "@/lib/backfill";
 import { listStationResolutions } from "@/lib/meltwater/stations";
 import { renderStationsPage } from "@/ui/stations";
@@ -251,8 +251,10 @@ app.get("/admin/heartbeat", async (c) => {
 // without adding a new destination; /stations needs its own destination (Zero Trust → Access). ---
 const stationsPage = async (c: Context<{ Bindings: Env }>) => {
   if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
-  const rows = await listStationResolutions(c.env.DB);
-  return c.html(renderStationsPage(rows));
+  const [rows, state] = await Promise.all([listStationResolutions(c.env.DB), getRenderState(c.env)]);
+  // Viewing the status also nudges the drainer — a refresh can pull a budget-deferred alarm earlier.
+  c.executionCtx.waitUntil(pokeStationRender(c.env).catch(() => {}));
+  return c.html(renderStationsPage(rows, state));
 };
 app.get("/stations", stationsPage);
 app.get("/inspect/stations", stationsPage);
