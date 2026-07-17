@@ -31,12 +31,90 @@ window ends. This is exactly the "multiple postings of clearly the same intervie
 Layers 1–2 run first (cheap, exact). Only broadcast media (`radio`/`tv`/…) that survives both
 reaches layer 3.
 
+## The techniques, from scratch
+
+Layer 3 is where the real work happens, and it leans on a handful of text-comparison ideas from
+information retrieval. This section defines each one from scratch — plain language, a tiny worked
+example, and the one reason we use it — so the sections below have a shared vocabulary. **If you
+already know shingles, overlap coefficient, longest common substring, SimHash, and Hamming distance,
+skip ahead to "How broadcast near-dup works".**
+
+**The problem, concretely.** The same sentence is read on air, and every station transcribes the
+audio independently with **ASR** (Automatic Speech Recognition — machine speech-to-text). So we
+receive two strings of the *same* spoken sentence that nonetheless differ in three ways: a typo or
+two, different `program – airtime` titles, and different lead-in/tail text because Meltwater's
+~300-char snippet is windowed around the matched keyword. The shared, verbatim part is a contiguous
+block in the middle; the differing parts are the two window ends. How do you tell these two strings
+are "the same"? Each technique below is a step toward that answer.
+
+**1. Tokenize / normalize** — first, stop punctuation and casing from causing spurious mismatches.
+Lowercase the text, turn every run of non-alphanumeric characters into a single space, and split on
+whitespace into **tokens** (words). `"The PM's plan, again!"` → `["the","pm","s","plan","again"]`.
+Now `PM's`, `PMs`, and `pm` all compare equal (`tokenize`, `src/lib/simhash.ts`).
+
+**2. Shingles** (a.k.a. **k-grams** / **n-grams**) — comparing bare word *sets* throws away order:
+`"dog bites man"` and `"man bites dog"` share every word. So we compare short windows instead. A
+**shingle** is a run of `k` consecutive tokens joined by a space, slid one token at a time across the
+token list. With k=3 over `["the","pm","backed","the","levy"]` you get `["the pm backed","pm backed
+the","backed the levy"]` — 3 shingles. (With fewer than `k` tokens it falls back to the raw token
+list.) Shingles encode *local word order*, so reordered text shares almost none. We build two sizes:
+**k=3 feeds SimHash** (`shingleSize`), **k=5 feeds the containment check** (`containmentShingleSize`)
+(`shingles`, `src/lib/simhash.ts`).
+
+**3. Set overlap: overlap coefficient, not Jaccard** — put each transcript's shingles into a **set**
+(duplicates dropped) and measure how much two sets A and B share by counting the shared elements
+(`|A∩B|`). There are two standard ways to turn that count into a score. Say A has 10 shingles, B has
+100, and all 10 of A's appear in B:
+
+| Measure | Formula | Plain English | This example |
+|---|---|---|---|
+| Jaccard | `\|A∩B\| / \|A∪B\|` | shared / total-distinct-across-both | 10/100 = **0.10** |
+| **Overlap coefficient** (ours) | `\|A∩B\| / min(\|A\|,\|B\|)` | shared / size-of-the-smaller-set | 10/10 = **1.00** |
+
+(The union of A and B here is 100, not 110 — every one of A's 10 shingles is already inside B, so the
+shared 10 are counted once, not twice.) We use the **min-based overlap coefficient** on purpose:
+because our windows differ in length, a short capture can sit *entirely inside* a longer one — a real
+duplicate — and dividing by the *smaller* set scores that ~1.0. Jaccard would drag it down toward 0.1
+just because the longer capture carries extra shingles. It's cheap (walk the smaller set, probe the
+larger — O(min) work) and typo-robust: one ASR typo only breaks the handful of shingles that
+physically span the bad word, so the score barely moves (`overlapCoefficient`, `src/lib/nearmatch.ts`).
+
+**4. Longest common contiguous word-run** — overlap can still be fooled by *scattered* shared words.
+So we also measure the longest block of identical *consecutive* tokens present in **both**
+transcripts. This is the classic "longest common substring", but measured over tokens rather than
+characters. For `A=["a","b","c","d","e"]` and `B=["x","c","d","e","y"]`, the answer is `["c","d","e"]`
+= **3** (computed with a space-optimized dynamic-programming table). This is the **false-positive
+killer**: a genuine shared reading contains a long verbatim block, whereas two unrelated stories that
+merely reuse a stock phrase share only a *short* run (`longestCommonRun`, `src/lib/nearmatch.ts`).
+
+**5. SimHash — a fuzzy fingerprint.** An ordinary hash like SHA-256 is built so that changing one
+character scrambles the *entire* output — perfect for exact-match, useless for "how similar?".
+**SimHash** is the opposite: similar inputs produce 64-bit fingerprints that differ in only a *few*
+bits. Construction: hash each 3-gram shingle to a 64-bit number, keep a running tally per bit-position
+(+1 where that bit is 1, −1 where it's 0), and set each final output bit to 1 if its tally ended
+positive. Each output bit is thus a **majority vote** of that bit across every shingle, so adding or
+changing a few shingles flips only a few output bits. (Returns `null` under 4 tokens — too little to
+fingerprint reliably.) (`simhash64`, `src/lib/simhash.ts`.)
+
+**6. Hamming distance** — how many bit positions two equal-length bit strings differ in, computed as
+`popcount(A XOR B)` (XOR marks the differing bits with a 1; count the 1s). `1011` vs `1001` → distance
+**1**. For SimHash fingerprints, a small Hamming distance means very similar text
+(`hammingDistance`, `src/lib/simhash.ts`).
+
+**The roles.** The **primary signal** for broadcast near-dup is overlap coefficient (over k=5
+shingles) **and** longest common run — a pair must clear *both* (**AND**, not OR): overlap alone
+fires on scattered common words, and a long run alone could be a shared soundbite. SimHash is *not*
+the deciding signal; it is only a **fast path** (a near-identical fingerprint — Hamming distance ≤ 3 —
+short-circuits straight to "accept", skipping the phrase work) plus a cheap DB candidate gate. It was
+demoted because a whole-transcript fingerprint is dominated by the differing window ends — it missed
+8 of 9 real duplicate pairs (see "Why not just SimHash?" below).
+
 ## How broadcast near-dup works
 
 Two broadcast mentions are the **same reading** only when the transcripts clear **both** of these
 (computed by `phraseNearDup` in `src/lib/nearmatch.ts`):
 
-1. **k-gram containment ≥ `minPhraseOverlap`** — the *overlap coefficient*
+1. **k-gram containment ≥ `minPhraseOverlap`** — the *overlap coefficient* (defined above)
    `|shingles(A) ∩ shingles(B)| / min(|A|, |B|)` over word 5-grams. It is **min-based, not Jaccard**,
    so a short capture fully inside a longer one still scores ~1.0 (Jaccard would dilute it by length).
    Cheap set intersection; typo-robust (an ASR typo only removes the handful of shingles spanning it).
@@ -46,7 +124,8 @@ Two broadcast mentions are the **same reading** only when the transcripts clear 
    not.
 
 Requiring **both** (AND) is deliberate — containment alone can fire on scattered common words; a long
-run alone could be a shared soundbite. Because the signal keys on the *overlap itself*, it is immune
+run alone could be a shared soundbite. The cheap overlap gate runs first, and the more expensive
+run DP only runs if overlap clears. Because the signal keys on the *overlap itself*, it is immune
 to the windowing problem that defeats a whole-transcript fingerprint.
 
 A whole-transcript SimHash (`src/lib/simhash.ts`) is still computed and stored, but only as a **fast

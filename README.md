@@ -6,12 +6,12 @@ curated signal, reformats it into a tight Slack Block Kit message (with link-unf
 disabled), and posts it — replacing Meltwater's noisy built-in Slack feed.
 
 - **Ingestion:** Meltwater Generic Webhook → `POST /webhooks/meltwater/:token`
-- **Pipeline:** `parse → filter → dedupe → syndication-merge → post` (`src/lib/process.ts`)
+- **Pipeline:** `parse → filter → dedupe → merge (syndication + broadcast near-dup) → post` (`src/lib/process.ts`)
 - **Streem-style output:** source + icon, bold linked headline, snippet with matched keywords as `code` pills (or a `Mentions: kw (n)` line), and an **Author | Organisation Brief** footer. Slack auto-unfurl is disabled.
-- **Syndication de-dup:** the same wire story across many outlets collapses into one message that lists every outlet (`📡 Also in: …`) — via `chat.update`.
+- **Deduplication:** three layers — exact (`seen_mentions`), same-headline **syndication**, and broadcast **shared-phrase near-duplicate** (SimHash + verbatim run) — collapse a story to one message that lists every outlet (`📡 Also in: …`) via `chat.update`. See [Deduplication](#deduplication).
 - **Tuning surface:** `src/config/feed.config.ts` (briefs, keywords, source allow/block, reach, media types)
 - **Broadcast station names:** radio/TV alerts don't carry the station — it's resolved from Meltwater's JS viewer and cached in D1 (see [Broadcast station names](#broadcast-station-names))
-- **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (dedupe), `stories` (syndication tracking + `render_hash` for the redecode backfill), `broadcast_stations` + `station_names` (radio/TV station resolution), `ops_state` (heartbeat bookkeeping)
+- **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (exact dedupe), `stories` (one row per story = one Slack message: `slack_ts` + `channel`, outlet list, `simhash`/`media_type` for broadcast near-dup, `render_hash` for the redecode backfill), `broadcast_stations` + `station_names` (radio/TV station resolution), `ops_state` (heartbeat bookkeeping)
 - **Cloudflare resources:** **Workers** (the app), **D1** (all persistence above), and **Browser Rendering** (the `browser` binding — headless Chromium, used *only* for first-time station-name resolution; a few seconds per new station, well within the free 10 min/day)
 - **Inspect:** `GET /inspect` (Cloudflare Access) — recent events, raw payload, filter decision + reason, Block Kit preview
 - **Monitoring:** `GET /health` validates the runtime config (`configOk`); an hourly cron **heartbeat** alerts Slack if ingestion goes quiet (`src/lib/heartbeat.ts`)
@@ -28,6 +28,7 @@ Auth model (all fail-closed except the two public routes) — see [Access & secu
 | `GET /inspect` | **Cloudflare Access** (login) | inspection UI (`?filter=failed` shows only errored/undelivered events) |
 | `GET /api/webhooks/recent` | **Cloudflare Access** | recent events as JSON |
 | `POST /admin/redecode` | `Authorization: Bearer REPLAY_KEY` | re-render recent cards under the current decoding and `chat.update` the changed ones in place (non-destructive). `dryRun=1` previews; `hours=N` sets the window (default 168); capped at 40 updates/call (re-run until `remaining` is 0) |
+| `POST /admin/coalesce` | `Authorization: Bearer REPLAY_KEY` | coalesce broadcast duplicates that posted as separate messages **in place** — edit the oldest, delete the rest (non-destructive to the survivor). `dryRun=1` previews; `hours=N`/`all=1` set the window; capped at 40 Slack calls/call (re-run until `remaining` is 0). See [Deduplication](#deduplication) |
 | `POST /admin/replay` | `Authorization: Bearer REPLAY_KEY` | reparse + **repost** archived events (destructive — clears + reposts; prefer `/admin/redecode`) |
 | `GET /admin/render-station?url=…` | `Authorization: Bearer REPLAY_KEY` | render a Meltwater viewer URL via Browser Rendering and return its station name (debug/verify) |
 | `GET /admin/heartbeat` | `Authorization: Bearer REPLAY_KEY` | run the ingestion-stall check on demand |
@@ -68,7 +69,8 @@ The archive is the source of truth; the Slack channel is a derived, rebuildable 
 - **Manual backfill.** `POST /admin/replay` (`Authorization: Bearer REPLAY_KEY`) reprocesses the
   archive: `reset=1` rebuilds dedupe/story state, `purge=1` clears the channel first, `limit=N`
   regenerates the most recent N. Idempotent — safe to re-run. (For a format-only refresh that keeps
-  reactions/threads, prefer `POST /admin/redecode`.)
+  reactions/threads, prefer `POST /admin/redecode`; to collapse already-posted broadcast duplicates in
+  place, `POST /admin/coalesce` — see [Deduplication](#deduplication).)
 
 ## Tuning the feed
 Edit `src/config/feed.config.ts`. Start lenient, watch `/inspect` on real traffic, then tighten:
@@ -76,10 +78,55 @@ Edit `src/config/feed.config.ts`. Start lenient, watch `/inspect` on real traffi
 - `includeMediaTypes` / `excludeMediaTypes` — kill radio/social/blog noise (set once you see the real values in `/inspect`)
 - `sourceAllowlist` / `sourceBlocklist`, `allowedCountryCodes`
 - `briefs[]` — each brief's `label` (the "Organisation Brief"), `keywords` (highlighted + counted), and optional `matchNames`/`channel`
+- `nearDuplicate` — broadcast shared-phrase merge thresholds (SimHash Hamming, phrase overlap, verbatim-run length, air-time gap, media types); see [Deduplication](#deduplication)
 
 > The Generic Webhook payload schema isn't publicly documented, so `src/lib/meltwater/parse.ts`
 > extracts fields defensively from many candidate names. **After the first real alert, open
 > `/inspect`, read the raw payload, and tighten `parse.ts` to the actual field names.**
+
+## Deduplication
+The feed collapses repeats so **one *story* is one Slack message**, however many mentions Meltwater
+sends for it. Three layers run in `src/lib/process.ts`, cheapest first:
+
+1. **Exact (idempotency).** Every kept mention is keyed by `sha-256(briefId | url)` — or
+   `sourceName|title` when it has no url — in the `seen_mentions` table; a mention already seen is
+   dropped with no Slack call. The key is **brief-scoped**, so the *same* article matched by a
+   *different* brief isn't silently swallowed — it flows to the merge path and is recorded as "also
+   matched". This is also what makes the reconcile/replay reruns idempotent.
+2. **Syndication (same headline).** A wire story republished across many outlets shares its headline,
+   so a `sha-256` of the **normalized** title (`src/lib/story.ts`) is the *story key*. A new mention
+   whose story key already exists **within 72h** folds into that story instead of posting again.
+3. **Broadcast near-duplicate (shared phrase).** Machine-transcribed radio/TV airs the *same reading*
+   across dozens of stations, but each capture has a different `program — <air-time>` title and a
+   slightly different speech-to-text, so layers 1–2 miss it. Two transcripts are judged the same story
+   by a shared-phrase test (`src/lib/nearmatch.ts` + `src/lib/simhash.ts`; thresholds in
+   `feedConfig.nearDuplicate`): an all-but-identical 64-bit **SimHash** (Hamming ≤ 3) is a fast accept;
+   otherwise they must clear **both** k-gram *containment* (overlap coefficient ≥ 0.25 — min-based, so
+   a short ~300-char snippet fully inside a longer transcript still scores high) **and** a *contiguous
+   verbatim run* (≥ 12 words, which rejects coincidental stock phrases). Two hard guards gate every
+   candidate first: **same media type** (radio never folds into TV) and **air-times within 3h** (a
+   re-air days later is a new story). The predicate lives in `src/lib/neardup.ts` and is shared with the
+   backfill below, so ingestion and cleanup judge duplicates identically.
+
+**A caught duplicate never posts a new message** — it folds into the existing story's card via
+`chat.update`: the outlet is appended (`📡 Also in: …`, up to 8 shown), the footer's single reach
+becomes an outlet count + combined reach, and any extra matching brief is noted. The durable handle is
+the `stories` row (`slack_ts` + `channel`), keyed by the *story*, not the mention — one message can
+represent many mentions across many `webhook_events`. Only mentions that actually posted/merged are
+marked `seen`, so a failed Slack call leaves the mention un-seen and the next reconcile retries it.
+
+### Coalescing historical duplicates
+Broadcast near-dup detection landed after some duplicates had already posted as separate messages.
+`POST /admin/coalesce` (`Authorization: Bearer REPLAY_KEY`) cleans those up **in place**: it re-clusters
+recent broadcast stories with the *same* near-dup predicate — **star-clustered around the oldest**, so a
+non-transitive match can't chain unrelated stories together — then per group **edits the oldest message**
+to list every outlet and **deletes the duplicates**. Reactions/threads on the survivor are preserved
+(unlike `/admin/replay`, which wipes + reposts). While merging it **re-resolves every station** (headline
+*and* each outlet) from the current D1 station map — a member's raw payload, or the docId embedded in an
+already-merged outlet's tracking url — so cards show real station names instead of a presenter byline
+frozen at ingestion. `dryRun=1` previews the groups (no Slack/D1 writes); `hours=N` bounds the window
+(default 168) or `all=1` scans from day 0; capped at 40 Slack calls/invocation — re-run until
+`remaining` is 0. Idempotent.
 
 ## Broadcast station names
 Radio/TV alerts (`providerType: tveyes_*`) don't carry the station in the payload — `authorName` is

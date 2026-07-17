@@ -1,5 +1,16 @@
 @AGENTS.md
 
+## Build & deploy (this is a Cloudflare Worker, not Next.js)
+
+- **Deploy:** `npm run deploy` (= `wrangler deploy`). Do **NOT** run `pnpm deploy` — that
+  triggers pnpm's built-in "deploy a workspace package" command and fails with
+  `ERR_PNPM_NOTHING_TO_DEPLOY`. Use `npm run deploy`, `pnpm run deploy`, or `npx wrangler deploy`.
+- **Pre-commit check:** `npm run typecheck && npm test` (the global `npm run build:local` rule is
+  for Next.js repos and does not apply here — there's no such script). To also catch bundling /
+  circular-import errors without uploading: `npx wrangler deploy --dry-run --outdir /tmp/hw-build`.
+- After deploying, optionally bump the `build` marker in `src/index.ts` (`/health` → `build`) so the
+  running version is visible; `wrangler deploy` also prints the Version ID.
+
 ## Operational log
 
 - **2026-07-10 — Meltwater webhook re-pointed to the custom domain.** The feed had been

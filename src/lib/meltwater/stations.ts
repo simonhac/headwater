@@ -14,6 +14,26 @@ export async function stationNameForCode(db: D1Database, code: string | null | u
   return row?.name ?? null;
 }
 
+/**
+ * Preload a `docId → resolved station name` map (broadcast_stations ⋈ station_names) for browser-free
+ * BATCH re-resolution — one query instead of a lookup per item. Only docs whose code has a real name
+ * are included; callers fall back to their own logic for a miss. Used by the coalesce backfill to
+ * re-render every clustered member's outlet under the current, now-complete station map.
+ */
+export async function loadDocIdStationNames(db: D1Database): Promise<Map<string, string>> {
+  const rows = await db
+    .prepare(
+      `SELECT bs.doc_id AS doc_id, sn.name AS name
+         FROM broadcast_stations bs
+         JOIN station_names sn ON sn.code = bs.code
+        WHERE bs.doc_id IS NOT NULL AND sn.name IS NOT NULL AND sn.name != ''`,
+    )
+    .all<{ doc_id: string; name: string }>();
+  const map = new Map<string, string>();
+  for (const r of rows.results ?? []) map.set(r.doc_id, r.name);
+  return map;
+}
+
 /** Record a code→name mapping (idempotent). `attempts` is the render attempt it was resolved on (the
  * DO passes this); pass 0 for a render-free name taken from a station-like authorName; null = untracked. */
 export async function upsertStationName(

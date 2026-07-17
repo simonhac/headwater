@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { clusterBroadcastStories, coalesceDuplicateStories } from "@/lib/coalesce";
+import { parseWebhookPayload } from "@/lib/meltwater/parse";
 import type { StoryRow } from "@/lib/story";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { Env } from "@/env";
@@ -50,30 +51,50 @@ function row(fields: Partial<StoryRow>, primary: NormalizedMention = mention()):
 }
 
 // A D1Database stub that records every .run() (so we can assert which rows were mutated/deleted) and
-// returns `rows` from every .all() (broadcastStoriesSince). Mirrors redecode.test.ts's fakeDB.
-function fakeDB(rows: StoryRow[]) {
+// serves rows per table: broadcastStoriesSince reads `stories`, loadDocIdStationNames reads the
+// broadcast_stations⋈station_names join. Mirrors redecode.test.ts's fakeDB.
+function fakeDB(opts: { stories?: StoryRow[]; docNames?: { doc_id: string; name: string }[] }) {
+  const stories = opts.stories ?? [];
+  const docNames = opts.docNames ?? [];
   const runs: { sql: string; args: unknown[] }[] = [];
-  const db = {
-    _runs: runs,
-    prepare(sql: string) {
-      return {
-        bind(...args: unknown[]) {
-          return {
-            all: async () => ({ results: rows }),
-            run: async () => {
-              runs.push({ sql, args });
-              return {};
-            },
-            first: async () => null,
-          };
-        },
-      };
+  // A statement exposes .all()/.run()/.first() directly AND via .bind() — mirrors D1, whose loader
+  // queries (no params) call prepare(sql).all() while parameterised ones call prepare(sql).bind(…).all().
+  const stmt = (sql: string, args: unknown[]) => ({
+    bind: (...a: unknown[]) => stmt(sql, a),
+    all: async () => {
+      if (/FROM stories/.test(sql)) return { results: stories };
+      if (/FROM broadcast_stations/.test(sql)) return { results: docNames };
+      return { results: [] };
     },
-  };
-  return db;
+    run: async () => {
+      runs.push({ sql, args });
+      return {};
+    },
+    first: async () => null,
+  });
+  return { _runs: runs, prepare: (sql: string) => stmt(sql, []) };
 }
 
 const okResp = (body: unknown) => ({ status: 200, headers: { get: () => null }, json: async () => body });
+
+// Meltwater click-tracking wrapper (double-encoded `u=`), mirroring redecode.test.ts.
+function trackingUrl(target: string): string {
+  return `https://t.fake/v2/click?m=webhook&u=${encodeURIComponent(encodeURIComponent(target))}`;
+}
+
+/** A broadcast story whose raw payload carries station doc `docId` and a person-like `authorName` — so
+ * its stored outlet name is the stale presenter, which re-resolution should upgrade to the station. */
+function radioStory(fields: Partial<StoryRow>, docId: string, authorName: string): StoryRow {
+  const raw = {
+    providerType: "tveyes_radio",
+    statusLine: "🔊 1M Reach",
+    source: "MPs",
+    authorName,
+    text: "shared broadcast transcript sentence about the story that aired across stations",
+    links: { source: trackingUrl(`https://transition.meltwater.com/paywall/redirect/${docId}`) },
+  };
+  return row({ ...fields, media_type: "radio" }, parseWebhookPayload(raw)[0]!);
+}
 
 describe("clusterBroadcastStories — star clustering (non-transitive)", () => {
   it("does NOT take the transitive closure: A~B and B~C but A≁C ⇒ {A:[B]}, C stands alone", () => {
@@ -125,7 +146,7 @@ describe("coalesceDuplicateStories", () => {
     vi.stubGlobal("fetch", vi.fn());
     const A = row({ story_key: "A", slack_ts: "1", simhash: "0", created_at: 0 });
     const B = row({ story_key: "B", slack_ts: "2", simhash: "0", created_at: 1 * HOUR });
-    const db = fakeDB([A, B]);
+    const db = fakeDB({ stories: [A, B] });
     const env = { DB: db, SLACK_BOT_TOKEN: "xoxb-test" } as unknown as Env;
 
     const res = await coalesceDuplicateStories(env, { hours: 168, dryRun: true, now: 100 * HOUR });
@@ -141,17 +162,17 @@ describe("coalesceDuplicateStories", () => {
     vi.stubGlobal("fetch", vi.fn(async () => okResp({ ok: true, ts: "1.2" })));
     const A = row({ story_key: "A", slack_ts: "1", simhash: "0", created_at: 0 });
     const B = row({ story_key: "B", slack_ts: "2", simhash: "0", created_at: 1 * HOUR }, mention({ sourceName: "3AW", url: "https://example.com/b" }));
-    const db = fakeDB([A, B]);
+    const db = fakeDB({ stories: [A, B] });
     const env = { DB: db, SLACK_BOT_TOKEN: "xoxb-test" } as unknown as Env;
 
     const res = await coalesceDuplicateStories(env, { hours: 168, dryRun: false, now: 100 * HOUR });
     expect(res.updated).toBe(1);
     expect(res.deleted).toBe(1);
     expect(res.failed).toBe(0);
-    // The merged card lists both outlets.
+    // The merged card lists both outlets (raw is null here, so names fall back to the stored snapshot).
     expect(res.changes[0]!.outlets).toEqual(["2GB", "3AW"]);
-    // updateOutlets persisted BEFORE the delete; the dup row was removed.
-    expect(db._runs.filter((r) => r.sql.includes("UPDATE stories SET outlets_json"))).toHaveLength(1);
+    // The coalesced canonical (primary + outlets) was persisted BEFORE the delete; the dup row removed.
+    expect(db._runs.filter((r) => /UPDATE stories SET primary_mention_json.*outlets_json/.test(r.sql))).toHaveLength(1);
     const deletes = db._runs.filter((r) => r.sql.includes("DELETE FROM stories"));
     expect(deletes).toHaveLength(1);
     expect(deletes[0]!.args[0]).toBe("B");
@@ -171,7 +192,7 @@ describe("coalesceDuplicateStories", () => {
     const A = row({ story_key: "A", slack_ts: "1", simhash: "0", created_at: 0 });
     const B = row({ story_key: "B", slack_ts: "2", simhash: "0", created_at: 1 * HOUR });
     const C = row({ story_key: "C", slack_ts: "3", simhash: "0", created_at: 2 * HOUR });
-    const db = fakeDB([A, B, C]);
+    const db = fakeDB({ stories: [A, B, C] });
     const env = { DB: db, SLACK_BOT_TOKEN: "xoxb-test" } as unknown as Env;
 
     const res = await coalesceDuplicateStories(env, { hours: 168, dryRun: false, now: 100 * HOUR });
@@ -180,6 +201,51 @@ describe("coalesceDuplicateStories", () => {
     expect(res.failed).toBe(1); // the second delete failed → row kept
     const deletes = db._runs.filter((r) => r.sql.includes("DELETE FROM stories"));
     expect(deletes.map((d) => d.args[0])).toEqual(["B"]); // C's row NOT deleted (message still there)
+  });
+
+  it("re-resolves each member's station from the D1 map into the merged card outlets", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    // Stored snapshots carry the stale presenter names (Ben Davis / Sabra Lane); the D1 map now names
+    // their stations. The merged card must show the RESOLVED station names, not the presenters.
+    const A = radioStory({ story_key: "A", slack_ts: "1", created_at: 0 }, "DOCA", "Ben Davis");
+    const B = radioStory({ story_key: "B", slack_ts: "2", created_at: 1 * HOUR }, "DOCB", "Sabra Lane");
+    const db = fakeDB({
+      stories: [A, B],
+      docNames: [
+        { doc_id: "DOCA", name: "702 ABC Sydney" },
+        { doc_id: "DOCB", name: "774 ABC Melbourne" },
+      ],
+    });
+    const env = { DB: db, SLACK_BOT_TOKEN: "xoxb-test" } as unknown as Env;
+
+    const res = await coalesceDuplicateStories(env, { hours: 0, dryRun: true, now: 100 * HOUR }); // hours:0 = day 0
+    expect(res.clusters).toBe(1);
+    expect(res.changes[0]!.outlets).toEqual(["702 ABC Sydney", "774 ABC Melbourne"]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("re-resolves an already-merged extra outlet via its stored tracking url's docId", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const A = radioStory({ story_key: "A", slack_ts: "1", created_at: 0 }, "DOCA", "Ben Davis");
+    // An extra outlet folded in via the live path — stored under a stale presenter name, but its url
+    // still carries the station docId (DOCX), so re-resolution can recover the real station.
+    const aOutlets = JSON.parse(A.outlets_json) as { name: string; url: string; reach: number | null }[];
+    aOutlets.push({ name: "Stale Presenter", url: trackingUrl("https://transition.meltwater.com/paywall/redirect/DOCX"), reach: 500 });
+    A.outlets_json = JSON.stringify(aOutlets);
+    const B = radioStory({ story_key: "B", slack_ts: "2", created_at: 1 * HOUR }, "DOCB", "Sabra Lane");
+    const db = fakeDB({
+      stories: [A, B],
+      docNames: [
+        { doc_id: "DOCA", name: "702 ABC Sydney" },
+        { doc_id: "DOCB", name: "774 ABC Melbourne" },
+        { doc_id: "DOCX", name: "666 ABC Canberra" },
+      ],
+    });
+    const env = { DB: db, SLACK_BOT_TOKEN: "xoxb-test" } as unknown as Env;
+
+    const res = await coalesceDuplicateStories(env, { hours: 0, dryRun: true, now: 100 * HOUR });
+    expect(res.changes[0]!.outlets).toContain("666 ABC Canberra");
+    expect(res.changes[0]!.outlets).not.toContain("Stale Presenter");
   });
 
   it("caps total Slack calls per invocation and reports the remainder", async () => {
@@ -193,7 +259,7 @@ describe("coalesceDuplicateStories", () => {
       rows.push(row({ story_key: `a${i}`, slack_ts: `${i}.0`, simhash: "0", created_at: base }));
       rows.push(row({ story_key: `b${i}`, slack_ts: `${i}.1`, simhash: "0", created_at: base + 1 * HOUR }));
     }
-    const db = fakeDB(rows);
+    const db = fakeDB({ stories: rows });
     const env = { DB: db, SLACK_BOT_TOKEN: "xoxb-test" } as unknown as Env;
 
     const res = await coalesceDuplicateStories(env, { hours: 24 * 365, dryRun: false, now: 5000 * HOUR });

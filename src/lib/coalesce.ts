@@ -22,6 +22,10 @@ import { updateSlack, deleteSlack } from "@/lib/slack/post";
 import { StoryStore, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 import { isNearDupPair, sideForStory, type NearDupSide } from "@/lib/neardup";
+import { reparseStory, resolveBroadcast } from "@/lib/redecode";
+import { isBroadcastMedium } from "@/lib/meltwater/parse";
+import { docIdFromLinks } from "@/lib/meltwater/station-resolve";
+import { loadDocIdStationNames } from "@/lib/meltwater/stations";
 
 const nd = feedConfig.nearDuplicate;
 
@@ -117,15 +121,60 @@ export function clusterBroadcastStories(rows: StoryRow[]): StoryCluster[] {
     .map((a) => ({ canonical: a.anchor.row, dups: a.dups.map((d) => d.row) }));
 }
 
-/** Fold every duplicate's outlets + matched briefs into the canonical's, deduped. */
-function mergeCluster(cluster: StoryCluster): { outlets: Outlet[]; briefLabels: string[] } {
-  let outlets = JSON.parse(cluster.canonical.outlets_json) as Outlet[];
-  let briefLabels = JSON.parse(cluster.canonical.brief_labels_json || "[]") as string[];
-  for (const dup of cluster.dups) {
-    for (const o of JSON.parse(dup.outlets_json) as Outlet[]) outlets = addOutlet(outlets, o);
-    for (const bl of JSON.parse(dup.brief_labels_json || "[]") as string[]) briefLabels = addBriefLabel(briefLabels, bl);
+const outletOf = (m: NormalizedMention): Outlet => ({ name: m.sourceName ?? "Unknown source", url: m.url, reach: m.reach });
+
+/** Current station name for a broadcast doc from the preloaded docId→name map, or null on a miss. */
+function stationNameForRaw(raw: unknown, nameByDoc: Map<string, string>): string | null {
+  const docId = docIdFromLinks((raw as { links?: unknown } | null)?.links);
+  return docId ? (nameByDoc.get(docId) ?? null) : null;
+}
+
+/** Re-resolve a stored story's primary under the current station map — mirrors redecode's per-story
+ * resolution (reparse the raw, then re-derive the broadcast headline from the D1 name), so a presenter
+ * byline / neutral masthead frozen at ingestion is upgraded to the real station. Falls back to the
+ * stored snapshot when there's no re-parseable raw. */
+function resolvePrimary(row: StoryRow, nameByDoc: Map<string, string>): { primary: NormalizedMention; oldPrimary: NormalizedMention } {
+  const { oldPrimary, reparsed } = reparseStory(row);
+  if (!reparsed) return { primary: oldPrimary, oldPrimary };
+  const primary = isBroadcastMedium(reparsed.mediaType)
+    ? resolveBroadcast(reparsed, oldPrimary, stationNameForRaw(reparsed.raw, nameByDoc))
+    : reparsed;
+  return { primary, oldPrimary };
+}
+
+/**
+ * Fold a cluster into one card's inputs, RE-RESOLVING every station from the current map so the merged
+ * card shows real station names — not the presenter byline / neutral "Radio"/"TV" masthead frozen at
+ * ingestion. The canonical's re-resolved primary becomes the headline; every member contributes its
+ * re-resolved primary as an outlet, plus any extra outlets it had already merged — those too are
+ * re-resolved, via the docId embedded in their stored tracking url (their per-mention raw is gone, but
+ * the url carries the same id). A url with no resolvable docId keeps its stored name. Deduped by url/name.
+ */
+function resolveAndMerge(
+  cluster: StoryCluster,
+  nameByDoc: Map<string, string>,
+): { primary: NormalizedMention; outlets: Outlet[]; briefLabels: string[] } {
+  const members = [cluster.canonical, ...cluster.dups];
+  let outlets: Outlet[] = [];
+  let briefLabels: string[] = [];
+  let canonicalPrimary: NormalizedMention | null = null;
+  for (let i = 0; i < members.length; i++) {
+    const member = members[i]!;
+    const { primary, oldPrimary } = resolvePrimary(member, nameByDoc);
+    if (i === 0) canonicalPrimary = primary;
+    outlets = addOutlet(outlets, outletOf(primary));
+    for (const o of otherOutlets(JSON.parse(member.outlets_json) as Outlet[], oldPrimary)) {
+      // Re-resolve an already-merged outlet from its stored url's docId (the url is the same tracking
+      // link docIdFromLinks unwraps). Keep the stored name when the url carries no resolvable docId.
+      const docId = docIdFromLinks({ source: o.url });
+      const resolved = docId ? nameByDoc.get(docId) : undefined;
+      outlets = addOutlet(outlets, resolved ? { ...o, name: resolved } : o);
+    }
+    for (const bl of JSON.parse(member.brief_labels_json || "[]") as string[]) {
+      briefLabels = addBriefLabel(briefLabels, bl);
+    }
   }
-  return { outlets, briefLabels };
+  return { primary: canonicalPrimary!, outlets, briefLabels };
 }
 
 /**
@@ -140,9 +189,13 @@ export async function coalesceDuplicateStories(
   opts: { hours: number; dryRun: boolean; now: number },
 ): Promise<CoalesceResult> {
   const stories = new StoryStore(env.DB);
-  const sinceMs = opts.now - opts.hours * 60 * 60 * 1000;
+  // hours <= 0 means "all history" (day 0) — bound the load window otherwise.
+  const sinceMs = opts.hours > 0 ? opts.now - opts.hours * 60 * 60 * 1000 : 0;
   const rows = await stories.broadcastStoriesSince(sinceMs);
   const clusters = clusterBroadcastStories(rows);
+  // Preload the docId→station-name map once so re-resolving every clustered member is in-memory
+  // (no per-item D1 read / browser). The map is complete for these items (all carry raw).
+  const nameByDoc = await loadDocIdStationNames(env.DB);
 
   const res: CoalesceResult = {
     windowHours: opts.hours,
@@ -161,8 +214,7 @@ export async function coalesceDuplicateStories(
 
   for (const cluster of clusters) {
     const canonical = cluster.canonical;
-    const { outlets, briefLabels } = mergeCluster(cluster);
-    const primary = JSON.parse(canonical.primary_mention_json) as NormalizedMention;
+    const { primary, outlets, briefLabels } = resolveAndMerge(cluster, nameByDoc);
     const card = buildAttachment(
       primary,
       resolveBrief(primary, feedConfig),
@@ -198,10 +250,10 @@ export async function coalesceDuplicateStories(
         else res.failed++;
         continue;
       }
-      // 2. Persist the merged outlets + new render hash IMMEDIATELY, before any delete. This closes
-      //    the window where the Slack card shows outlets D1 doesn't record — otherwise a crash
-      //    mid-delete lets heal/redecode rebuild from the stale outlets_json and revert the card.
-      await stories.updateOutlets(canonical.story_key, outlets, briefLabels, newHash, opts.now);
+      // 2. Persist the re-resolved primary + merged outlets + new render hash IMMEDIATELY, before any
+      //    delete. This closes the window where the Slack card shows outlets D1 doesn't record —
+      //    otherwise a crash mid-delete lets heal/redecode rebuild from the stale snapshot and revert.
+      await stories.coalesceInto(canonical.story_key, primary, outlets, briefLabels, newHash, opts.now);
       res.updated++;
     }
 

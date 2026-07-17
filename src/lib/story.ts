@@ -161,4 +161,16 @@ export class StoryStore {
   async deleteStory(key: string): Promise<void> {
     await this.db.prepare(`DELETE FROM stories WHERE story_key = ?`).bind(key).run();
   }
+
+  /** Persist a coalesced canonical in one write: the re-resolved primary snapshot, the merged outlet
+   * + matched-brief lists, and the new render hash. Recency is bumped so the hourly heal keeps the
+   * fix rather than reviving a stale render. Used by the coalesce backfill. */
+  async coalesceInto(key: string, primary: unknown, outlets: Outlet[], briefLabels: string[], renderHash: string, now: number): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE stories SET primary_mention_json = ?, outlets_json = ?, brief_labels_json = ?, render_hash = ?, updated_at = ? WHERE story_key = ?`,
+      )
+      .bind(JSON.stringify(primary), JSON.stringify(outlets), JSON.stringify(briefLabels), renderHash, now, key)
+      .run();
+  }
 }
