@@ -118,10 +118,11 @@ export class StoryStore {
       .run();
   }
 
-  /** Recent stories that carry a SimHash (broadcast), for near-duplicate lookup. */
+  /** Recent stories that carry a SimHash (broadcast), for near-duplicate lookup. Oldest-first so a
+   * tie among equally-good matches folds into the ORIGINAL card (stable under replay/reconcile). */
   async recentWithSimhash(sinceMs: number): Promise<StoryRow[]> {
     const res = await this.db
-      .prepare(`SELECT * FROM stories WHERE simhash IS NOT NULL AND updated_at >= ?`)
+      .prepare(`SELECT * FROM stories WHERE simhash IS NOT NULL AND updated_at >= ? ORDER BY created_at ASC`)
       .bind(sinceMs)
       .all<StoryRow>();
     return res.results ?? [];

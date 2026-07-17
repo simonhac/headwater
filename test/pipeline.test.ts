@@ -16,7 +16,17 @@ const cfg: FeedConfig = {
   sourceBlocklist: [],
   allowedCountryCodes: ["AU"],
   requireMatchedKeyword: false,
-  nearDuplicate: { enabled: true, windowHours: 6, maxHammingDistance: 3, shingleSize: 3, mediaTypes: ["radio", "tv"] },
+  nearDuplicate: {
+    enabled: true,
+    windowHours: 12,
+    maxHammingDistance: 3,
+    shingleSize: 3,
+    minPhraseOverlap: 0.25,
+    minContiguousRun: 12,
+    containmentShingleSize: 5,
+    maxAirtimeGapHours: 3,
+    mediaTypes: ["radio", "tv"],
+  },
   defaultBriefLabel: "Media",
   briefs: [{ id: "kp", label: "Key People", matchNames: ["key people"], keywords: ["renewable", "Ross Garnaut"] }],
 };

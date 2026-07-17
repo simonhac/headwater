@@ -9,10 +9,11 @@ import { postToSlack, updateSlack } from "@/lib/slack/post";
 import { StoryStore, storyKey, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 import { simhash64, hammingDistance } from "@/lib/simhash";
+import { buildSketch, phraseNearDup, type PhraseSketch } from "@/lib/nearmatch";
 import { stationCodeFor, viewerUrlForRaw } from "@/lib/meltwater/station-resolve";
 import { stationNameForCode, upsertStationName } from "@/lib/meltwater/stations";
 import { looksLikePerson } from "@/lib/meltwater/outlets";
-import { broadcastMediumLabel } from "@/lib/slack/format";
+import { broadcastMediumLabel, broadcastAirtime } from "@/lib/slack/format";
 import { enqueueStationRender } from "@/do/client";
 import { decide } from "@/lib/decide";
 import { sha256Hex } from "@/lib/ids";
@@ -100,17 +101,70 @@ function promoteStation(mention: NormalizedMention, station: string): void {
   mention.sourceName = station;
 }
 
-/** Closest recent broadcast story whose transcript SimHash is within the configured Hamming distance. */
-async function findNearDup(stories: StoryStore, fp: bigint, now: number): Promise<StoryRow | null> {
+/** The primary mention's title + snippet, recovered from a story row (null on any parse failure). */
+function primaryOf(row: StoryRow): { title: string | null; snippet: string | null } {
+  try {
+    const p = JSON.parse(row.primary_mention_json) as { title?: string | null; snippet?: string | null };
+    return { title: p.title ?? null, snippet: p.snippet ?? null };
+  } catch {
+    return { title: null, snippet: null };
+  }
+}
+
+/** Broadcast air-time (epoch ms) parsed from a title's RFC tail, or null when absent/unparseable. */
+function airtimeMs(title: string | null): number | null {
+  const tail = broadcastAirtime(title);
+  if (!tail) return null;
+  const t = Date.parse(tail);
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * The recent broadcast story this mention duplicates, or null. Two hard guardrails gate every
+ * candidate FIRST — same media type, and broadcast air-times within `maxAirtimeGapHours` — so a
+ * radio clip never folds into a TV story and a phrase re-used a day later never collapses. Then an
+ * identical SimHash is a free accept (fast path); otherwise the transcripts must clear phrase
+ * containment AND a contiguous verbatim run (`phraseNearDup`). Highest-overlap candidate wins.
+ */
+async function findNearDup(
+  stories: StoryStore,
+  mention: NormalizedMention,
+  fp: bigint | null,
+  sketch: PhraseSketch | null,
+  now: number,
+): Promise<StoryRow | null> {
   const since = now - nd.windowHours * 60 * 60 * 1000;
+  const mediaType = (mention.mediaType ?? "").toLowerCase();
+  const mAir = airtimeMs(mention.title);
+  const maxGapMs = nd.maxAirtimeGapHours * 60 * 60 * 1000;
+
   let best: StoryRow | null = null;
-  let bestDist = nd.maxHammingDistance + 1;
+  let bestOverlap = -1;
   for (const c of await stories.recentWithSimhash(since)) {
-    if (!c.simhash) continue;
-    const dist = hammingDistance(fp, BigInt(c.simhash));
-    if (dist <= nd.maxHammingDistance && dist < bestDist) {
+    // Guard 1 — same media type only (radio↔radio, tv↔tv), even with overlapping transcripts.
+    if ((c.media_type ?? "").toLowerCase() !== mediaType) continue;
+    const prim = primaryOf(c);
+    // Guard 2 — air-time proximity. Only enforced when both air-times parse; otherwise the
+    // `windowHours` receipt-time bound above is the sole temporal cap.
+    if (mAir !== null) {
+      const cAir = airtimeMs(prim.title);
+      if (cAir !== null && Math.abs(cAir - mAir) > maxGapMs) continue;
+    }
+    // Fast path — an all-but-identical fingerprint is the same reading; accept without phrase work.
+    if (fp !== null && c.simhash && hammingDistance(fp, BigInt(c.simhash)) <= nd.maxHammingDistance) {
+      return c;
+    }
+    // Primary signal — k-gram containment + contiguous verbatim run over the transcripts.
+    if (!sketch) continue;
+    const cand = buildSketch(prim.snippet, nd.containmentShingleSize);
+    if (!cand) continue;
+    const { overlap, match } = phraseNearDup(sketch, cand, {
+      minPhraseOverlap: nd.minPhraseOverlap,
+      minContiguousRun: nd.minContiguousRun,
+    });
+    if (match && overlap > bestOverlap) {
       best = c;
-      bestDist = dist;
+      bestOverlap = overlap;
     }
   }
   return best;
@@ -179,11 +233,16 @@ export async function processEvent(
     let key: string | null = null;
     let existing: StoryRow | null = null;
     if (!isSeen && postingEnabled) {
-      const simFp = nd.enabled && broadcast ? simhash64(mention.snippet, nd.shingleSize) : null;
+      const doNearDup = nd.enabled && broadcast;
+      const simFp = doNearDup ? simhash64(mention.snippet, nd.shingleSize) : null;
       simhashStr = simFp === null ? null : simFp.toString();
+      const sketch = doNearDup ? buildSketch(mention.snippet, nd.containmentShingleSize) : null;
       key = mention.title ? await storyKey(mention.title) : null;
+      // Same-title syndication first; then broadcast near-duplicate by shared phrase.
       existing = key ? await stories.getFresh(key, now - SYNDICATION_WINDOW_MS) : null;
-      if (!existing && simFp !== null) existing = await findNearDup(stories, simFp, now);
+      if (!existing && (simFp !== null || sketch !== null)) {
+        existing = await findNearDup(stories, mention, simFp, sketch, now);
+      }
     }
 
     const action = decide({ seen: isSeen, postingEnabled, existing: !!existing });

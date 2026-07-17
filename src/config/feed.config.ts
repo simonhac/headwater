@@ -33,14 +33,28 @@ export const DEFAULT_BRIEF_COLOR = "#868e96";
 
 /** Fold near-identical broadcast segments (same clip across stations) into one card. */
 export interface NearDuplicateConfig {
-  /** Master switch for SimHash-based broadcast near-dup merging. */
+  /** Master switch for broadcast near-dup merging. */
   enabled: boolean;
-  /** Only look back this many hours for a near-duplicate to merge into. */
+  /** Only look back this many hours for a near-duplicate to merge into (DB-level candidate cap). */
   windowHours: number;
-  /** Max Hamming distance between 64-bit SimHashes to treat as the same segment (lower = stricter). */
+  /** Hamming distance within which an identical SimHash short-circuits to accept (cheap fast path). */
   maxHammingDistance: number;
   /** Word-shingle size fed into the SimHash. */
   shingleSize: number;
+  /**
+   * Primary signal: min k-gram containment (overlap coefficient, |A∩B| / min(|A|,|B|)) required
+   * to consider two transcripts the same reading.
+   */
+  minPhraseOverlap: number;
+  /** Confirmation: min longest common contiguous word-run — the verbatim run that rejects coincidence. */
+  minContiguousRun: number;
+  /** Word k-gram size for the containment shingles (distinct from the SimHash `shingleSize`). */
+  containmentShingleSize: number;
+  /**
+   * Guardrail: never merge two captures whose broadcast air-times (parsed from the title) differ by
+   * more than this. The same reading re-airs across a news cycle, not days apart.
+   */
+  maxAirtimeGapHours: number;
   /** Media types this applies to (case-insensitive substring match against a mention's mediaType). */
   mediaTypes: string[];
 }
@@ -78,9 +92,13 @@ export const feedConfig: FeedConfig = {
   requireMatchedKeyword: false,
   nearDuplicate: {
     enabled: true,
-    windowHours: 6,
+    windowHours: 12,
     maxHammingDistance: 3,
     shingleSize: 3,
+    minPhraseOverlap: 0.25,
+    minContiguousRun: 12,
+    containmentShingleSize: 5,
+    maxAirtimeGapHours: 3,
     mediaTypes: ["radio", "tv", "television", "broadcast"],
   },
   defaultBriefLabel: "Media Monitoring",

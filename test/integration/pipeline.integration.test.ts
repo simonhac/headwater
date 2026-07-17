@@ -26,6 +26,35 @@ async function count(table: "stories" | "seen_mentions"): Promise<number> {
   return row?.n ?? 0;
 }
 
+async function outletNames(): Promise<string[]> {
+  const row = await env.DB.prepare("SELECT outlets_json FROM stories").first<{ outlets_json: string }>();
+  return (JSON.parse(row!.outlets_json) as { name: string }[]).map((o) => o.name);
+}
+
+/**
+ * A broadcast ("Every Mention") payload. `station` is a station-like `authorName` (digits/all-caps →
+ * not a person → kept as the outlet, no station-resolve network) and `article` has no Meltwater
+ * `/paywall/redirect/` id (so `stationCodeFor` returns null without fetching). Distinct `article`
+ * → distinct dedupe key; the RFC air-time tail in `title` drives the air-time guard.
+ */
+function radioReading(o: { title: string; station: string; article: string; text: string; providerType?: string }) {
+  return {
+    type: "Every Mention",
+    providerType: o.providerType ?? "tveyes_radio",
+    title: o.title,
+    statusLine: "🔊 55k Reach — 😐 Neutral Sentiment",
+    source: "MPs",
+    keywords: "MP",
+    authorName: o.station,
+    text: o.text,
+    links: { article: o.article, source: "https://news.example.test/" },
+  };
+}
+
+// The verbatim reading a syndicated radio bulletin carries across stations.
+const READING =
+  "Federal Independent MP Andrew Wilkie has accused the state government of rolling out the red carpet to a predatory industry by approving a new gambling licence to online bookmaker";
+
 describe("processEvent (real D1 + mocked Slack)", () => {
   let calls: string[];
 
@@ -85,6 +114,107 @@ describe("processEvent (real D1 + mocked Slack)", () => {
     const outlets = await env.DB.prepare("SELECT outlets_json FROM stories").first<{ outlets_json: string }>();
     const names = (JSON.parse(outlets!.outlets_json) as { name: string }[]).map((o) => o.name);
     expect(names).toEqual(["The Australian", "The Age"]);
+  });
+
+  it("broadcast: folds a same-reading segment from another station into one card (phrase overlap)", async () => {
+    // Different program/airtime titles + different stations → same-title syndication misses; the
+    // shared verbatim READING (despite different windowed lead-ins) makes it a phrase near-dup.
+    const s1 = await run(
+      "b1",
+      radioReading({
+        title: "Darren Kerwin - Wed, 08 Jul 2026 08:00:00 +1000",
+        station: "98.9 7AD FM",
+        article: "https://radio.example/a1",
+        text: `the other end of the state his death prompted discussions around fatigue management for health workers ${READING}`,
+      }),
+    );
+    expect(s1.posted).toBe(1);
+    calls = [];
+    const s2 = await run(
+      "b2",
+      radioReading({
+        title: "Patty and Ravyn - Wed, 08 Jul 2026 08:30:00 +1000",
+        station: "Sea FM 101.7",
+        article: "https://radio.example/a2",
+        text: `lincoln quilliam there enter his weapon for the event in the coming weeks held in march next year ${READING}`,
+      }),
+    );
+    expect(s2.merged).toBe(1);
+    expect(s2.posted).toBe(0);
+    expect(calls.some((u) => u.includes("chat.update"))).toBe(true);
+    expect(await count("stories")).toBe(1);
+    expect(await outletNames()).toEqual(["98.9 7AD FM", "Sea FM 101.7"]);
+  });
+
+  it("broadcast: keeps a different bulletin that only shares a short stock phrase as its own story", async () => {
+    await run(
+      "b3",
+      radioReading({
+        title: "Breakfast - Wed, 08 Jul 2026 08:00:00 +1000",
+        station: "98.9 7AD FM",
+        article: "https://radio.example/b1",
+        text: "the government defended its decision amid criticism that it was rolling out the red carpet to a predatory industry according to the opposition today",
+      }),
+    );
+    const s2 = await run(
+      "b4",
+      radioReading({
+        title: "Drive - Wed, 08 Jul 2026 09:00:00 +1000",
+        station: "Sea FM 101.7",
+        article: "https://radio.example/b2",
+        text: "consumer advocates warned the policy risked rolling out the red carpet to a predatory industry and called for an urgent review by regulators",
+      }),
+    );
+    expect(s2.posted).toBe(1); // only the ≤9-word clause overlaps → below minContiguousRun
+    expect(s2.merged).toBe(0);
+    expect(await count("stories")).toBe(2);
+  });
+
+  it("broadcast: never merges across media type (radio vs TV) even with identical transcript", async () => {
+    await run(
+      "b5",
+      radioReading({
+        title: "Darren Kerwin - Wed, 08 Jul 2026 08:00:00 +1000",
+        station: "98.9 7AD FM",
+        article: "https://radio.example/c1",
+        text: READING,
+      }),
+    );
+    const s2 = await run(
+      "b6",
+      radioReading({
+        providerType: "tveyes_tv",
+        title: "ABC News - Wed, 08 Jul 2026 08:30:00 +1000",
+        station: "ABC TV Sydney",
+        article: "https://radio.example/c2",
+        text: READING,
+      }),
+    );
+    expect(s2.posted).toBe(1); // media-type guard
+    expect(await count("stories")).toBe(2);
+  });
+
+  it("broadcast: never merges when air-times are more than maxAirtimeGapHours apart", async () => {
+    await run(
+      "b7",
+      radioReading({
+        title: "Darren Kerwin - Wed, 08 Jul 2026 08:00:00 +1000",
+        station: "98.9 7AD FM",
+        article: "https://radio.example/d1",
+        text: READING,
+      }),
+    );
+    const s2 = await run(
+      "b8",
+      radioReading({
+        title: "Evenings - Wed, 08 Jul 2026 13:00:00 +1000", // +5h > maxAirtimeGapHours (3)
+        station: "Sea FM 101.7",
+        article: "https://radio.example/d2",
+        text: READING,
+      }),
+    );
+    expect(s2.posted).toBe(1); // air-time guard, despite identical transcript
+    expect(await count("stories")).toBe(2);
   });
 
   it("previews (no post) when POSTING is off — decide() → preview", async () => {
