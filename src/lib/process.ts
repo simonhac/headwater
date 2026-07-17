@@ -8,12 +8,13 @@ import { buildAttachment, buildPostPayload, attachmentHash } from "@/lib/slack/f
 import { postToSlack, updateSlack } from "@/lib/slack/post";
 import { StoryStore, storyKey, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
-import { simhash64, hammingDistance } from "@/lib/simhash";
-import { buildSketch, phraseNearDup, type PhraseSketch } from "@/lib/nearmatch";
+import { simhash64 } from "@/lib/simhash";
+import { buildSketch, type PhraseSketch } from "@/lib/nearmatch";
+import { isNearDupPair, sideForStory, airtimeMs, type NearDupSide } from "@/lib/neardup";
 import { stationCodeFor, viewerUrlForRaw } from "@/lib/meltwater/station-resolve";
 import { stationNameForCode, upsertStationName } from "@/lib/meltwater/stations";
 import { looksLikePerson } from "@/lib/meltwater/outlets";
-import { broadcastMediumLabel, broadcastAirtime } from "@/lib/slack/format";
+import { broadcastMediumLabel } from "@/lib/slack/format";
 import { enqueueStationRender } from "@/do/client";
 import { decide } from "@/lib/decide";
 import { sha256Hex } from "@/lib/ids";
@@ -101,30 +102,12 @@ function promoteStation(mention: NormalizedMention, station: string): void {
   mention.sourceName = station;
 }
 
-/** The primary mention's title + snippet, recovered from a story row (null on any parse failure). */
-function primaryOf(row: StoryRow): { title: string | null; snippet: string | null } {
-  try {
-    const p = JSON.parse(row.primary_mention_json) as { title?: string | null; snippet?: string | null };
-    return { title: p.title ?? null, snippet: p.snippet ?? null };
-  } catch {
-    return { title: null, snippet: null };
-  }
-}
-
-/** Broadcast air-time (epoch ms) parsed from a title's RFC tail, or null when absent/unparseable. */
-function airtimeMs(title: string | null): number | null {
-  const tail = broadcastAirtime(title);
-  if (!tail) return null;
-  const t = Date.parse(tail);
-  return Number.isNaN(t) ? null : t;
-}
-
 /**
- * The recent broadcast story this mention duplicates, or null. Two hard guardrails gate every
- * candidate FIRST — same media type, and broadcast air-times within `maxAirtimeGapHours` — so a
- * radio clip never folds into a TV story and a phrase re-used a day later never collapses. Then an
- * identical SimHash is a free accept (fast path); otherwise the transcripts must clear phrase
- * containment AND a contiguous verbatim run (`phraseNearDup`). Highest-overlap candidate wins.
+ * The recent broadcast story this mention duplicates, or null. Delegates the per-candidate decision
+ * to the shared `isNearDupPair` predicate (same media type + air-time proximity, then SimHash fast
+ * path or phrase containment + verbatim run), so ingestion and the coalesce backfill judge dups
+ * identically. An identical-enough fingerprint short-circuits to that candidate; otherwise the
+ * highest phrase-overlap candidate wins.
  */
 async function findNearDup(
   stories: StoryStore,
@@ -134,37 +117,21 @@ async function findNearDup(
   now: number,
 ): Promise<StoryRow | null> {
   const since = now - nd.windowHours * 60 * 60 * 1000;
-  const mediaType = (mention.mediaType ?? "").toLowerCase();
-  const mAir = airtimeMs(mention.title);
-  const maxGapMs = nd.maxAirtimeGapHours * 60 * 60 * 1000;
+  const inc: NearDupSide = {
+    fp,
+    sketch,
+    airtime: airtimeMs(mention.title),
+    mediaType: (mention.mediaType ?? "").toLowerCase(),
+  };
 
   let best: StoryRow | null = null;
   let bestOverlap = -1;
   for (const c of await stories.recentWithSimhash(since)) {
-    // Guard 1 — same media type only (radio↔radio, tv↔tv), even with overlapping transcripts.
-    if ((c.media_type ?? "").toLowerCase() !== mediaType) continue;
-    const prim = primaryOf(c);
-    // Guard 2 — air-time proximity. Only enforced when both air-times parse; otherwise the
-    // `windowHours` receipt-time bound above is the sole temporal cap.
-    if (mAir !== null) {
-      const cAir = airtimeMs(prim.title);
-      if (cAir !== null && Math.abs(cAir - mAir) > maxGapMs) continue;
-    }
-    // Fast path — an all-but-identical fingerprint is the same reading; accept without phrase work.
-    if (fp !== null && c.simhash && hammingDistance(fp, BigInt(c.simhash)) <= nd.maxHammingDistance) {
-      return c;
-    }
-    // Primary signal — k-gram containment + contiguous verbatim run over the transcripts.
-    if (!sketch) continue;
-    const cand = buildSketch(prim.snippet, nd.containmentShingleSize);
-    if (!cand) continue;
-    const { overlap, match } = phraseNearDup(sketch, cand, {
-      minPhraseOverlap: nd.minPhraseOverlap,
-      minContiguousRun: nd.minContiguousRun,
-    });
-    if (match && overlap > bestOverlap) {
+    const v = isNearDupPair(inc, sideForStory(c, nd), nd);
+    if (v.fast) return c; // fast path — accept the first (oldest) all-but-identical fingerprint.
+    if (v.match && v.overlap > bestOverlap) {
       best = c;
-      bestOverlap = overlap;
+      bestOverlap = v.overlap;
     }
   }
   return best;

@@ -11,7 +11,8 @@
     "db:migrate:local": "wrangler d1 migrations apply headwater --local",
     "db:migrate:remote": "wrangler d1 migrations apply headwater --remote",
     "test": "vitest run",
-    "backfill:stations": "curl -fsS -X POST -H \"Authorization: Bearer ${REPLAY_KEY:?set REPLAY_KEY}\" https://feed.moofer.com/admin/backfill-stations"
+    "backfill:stations": "curl -fsS -X POST -H \"Authorization: Bearer ${REPLAY_KEY:?set REPLAY_KEY}\" https://feed.moofer.com/admin/backfill-stations",
+    "coalesce:duplicates": "curl -fsS -X POST -H \"Authorization: Bearer ${REPLAY_KEY:?set REPLAY_KEY}\" \"https://feed.moofer.com/admin/coalesce?${ARGS:-dryRun=1}\""
   },
   "dependencies": {
     "@cloudflare/puppeteer": "^1.1.0",

@@ -144,4 +144,21 @@ export class StoryStore {
       .bind(JSON.stringify(primary), renderHash, key)
       .run();
   }
+
+  /** Broadcast stories (carry a SimHash) CREATED within the window — the coalesce backfill's
+   * candidate set. Ordered oldest-first so star-clustering anchors on the original card. Note: no
+   * `created_at` index exists (only `updated_at`/`simhash`), so this is a bounded full scan — fine
+   * for a one-off maintenance sweep. */
+  async broadcastStoriesSince(sinceMs: number): Promise<StoryRow[]> {
+    const res = await this.db
+      .prepare(`SELECT * FROM stories WHERE simhash IS NOT NULL AND created_at >= ? ORDER BY created_at ASC`)
+      .bind(sinceMs)
+      .all<StoryRow>();
+    return res.results ?? [];
+  }
+
+  /** Delete a story row (used by the coalesce backfill AFTER its duplicate Slack message is removed). */
+  async deleteStory(key: string): Promise<void> {
+    await this.db.prepare(`DELETE FROM stories WHERE story_key = ?`).bind(key).run();
+  }
 }

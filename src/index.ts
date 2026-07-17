@@ -6,6 +6,7 @@ import { SeenStore } from "@/lib/store/seen";
 import { processEvent } from "@/lib/process";
 import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
+import { coalesceDuplicateStories } from "@/lib/coalesce";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
 import { pokeStationRender, getRenderState } from "@/do/client";
 import { backfillStations } from "@/lib/backfill";
@@ -199,6 +200,30 @@ app.post("/admin/redecode", async (c) => {
   const hours = Number.isFinite(hoursRaw) && hoursRaw > 0 ? hoursRaw : 24 * 7;
   try {
     const result = await redecodeRecentStories(c.env, { hours, dryRun, now: Date.now() });
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
+// --- admin: coalesce broadcast duplicates posted (before near-dup detection deployed) as separate
+// messages. Re-clusters the last `hours` of broadcast stories with the SAME near-dup engine, edits
+// the oldest message in each group to list all outlets, and deletes the redundant ones IN PLACE
+// (reactions/threads on the survivor preserved — this is NOT the destructive replay/purge path).
+// Gated by REPLAY_KEY; `hours` defaults to 7 days; `dryRun=1` previews without touching Slack/D1.
+// Re-run until `remaining=0` (idempotent). ---
+app.post("/admin/coalesce", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const dryRun = c.req.query("dryRun") === "1";
+  if (!dryRun && c.env.POSTING_ENABLED !== "true") {
+    return c.text("POSTING_ENABLED is not true (use dryRun=1 to preview)", 409);
+  }
+  const hoursRaw = Number(c.req.query("hours"));
+  const hours = Number.isFinite(hoursRaw) && hoursRaw > 0 ? hoursRaw : 24 * 7;
+  try {
+    const result = await coalesceDuplicateStories(c.env, { hours, dryRun, now: Date.now() });
     return c.json(result);
   } catch (e) {
     return c.json({ error: String(e) }, 500);
