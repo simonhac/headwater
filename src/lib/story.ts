@@ -1,9 +1,22 @@
 import { sha256Hex } from "@/lib/ids";
+import type { NormalizedMention } from "@/lib/meltwater/types";
 
 export interface Outlet {
-  name: string;
+  name: string; // = the mention's sourceName (the masthead); kept as the dedupe/display key
   url: string | null;
   reach: number | null;
+  // Optional display fields — present only on outlets written by the reach-led code (an old
+  // `{name,url,reach}` row parses fine with these `undefined`). They let the highest-reach outlet lead
+  // the card with its OWN headline/snippet/byline. `raw` is deliberately NOT stored (only the anchor,
+  // in `primary_mention_json`, is ever reparsed).
+  title?: string | null;
+  snippet?: string | null;
+  author?: string | null;
+  outletUrl?: string | null;
+  mediaType?: string | null;
+  sentiment?: string | null;
+  publishedAt?: string | null;
+  matchedKeywords?: string[];
 }
 
 export interface StoryRow {
@@ -35,6 +48,25 @@ export function normalizeTitle(title: string): string {
 
 export async function storyKey(title: string): Promise<string> {
   return sha256Hex(normalizeTitle(title));
+}
+
+/** Build the stored Outlet for a mention, capturing the display fields so a high-reach outlet can lead
+ * the card with its own headline/snippet/byline. `raw` is intentionally dropped (only the anchor's
+ * `primary_mention_json` is ever reparsed). Shared by ingestion + coalesce so the shape can't diverge. */
+export function outletOf(m: NormalizedMention): Outlet {
+  return {
+    name: m.sourceName ?? "Unknown source",
+    url: m.url,
+    reach: m.reach,
+    title: m.title,
+    snippet: m.snippet,
+    author: m.author,
+    outletUrl: m.outletUrl,
+    mediaType: m.mediaType,
+    sentiment: m.sentiment,
+    publishedAt: m.publishedAt,
+    matchedKeywords: m.matchedKeywords,
+  };
 }
 
 /** Add an outlet to the list unless the same url (or same name) is already present. */

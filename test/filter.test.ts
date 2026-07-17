@@ -48,6 +48,7 @@ function config(overrides: Partial<FeedConfig> = {}): FeedConfig {
       containmentShingleSize: 5,
       maxAirtimeGapHours: 3,
       mediaTypes: ["radio", "tv"],
+      crossMediaNetworks: [],
     },
     defaultBriefLabel: "Media Monitoring",
     briefs: [briefMps, briefTeals],

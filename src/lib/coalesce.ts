@@ -17,9 +17,9 @@
 import type { Env } from "@/env";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import { resolveBrief } from "@/lib/filter/engine";
-import { buildAttachment, attachmentHash } from "@/lib/slack/format";
+import { buildStoryAttachment, attachmentHash } from "@/lib/slack/format";
 import { updateSlack, deleteSlack } from "@/lib/slack/post";
-import { StoryStore, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
+import { StoryStore, outletOf, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 import { isNearDupPair, sideForStory, type NearDupSide } from "@/lib/neardup";
 import { reparseStory, resolveBroadcast } from "@/lib/redecode";
@@ -121,8 +121,6 @@ export function clusterBroadcastStories(rows: StoryRow[]): StoryCluster[] {
     .map((a) => ({ canonical: a.anchor.row, dups: a.dups.map((d) => d.row) }));
 }
 
-const outletOf = (m: NormalizedMention): Outlet => ({ name: m.sourceName ?? "Unknown source", url: m.url, reach: m.reach });
-
 /** Current station name for a broadcast doc from the preloaded docId→name map, or null on a miss. */
 function stationNameForRaw(raw: unknown, nameByDoc: Map<string, string>): string | null {
   const docId = docIdFromLinks((raw as { links?: unknown } | null)?.links);
@@ -215,13 +213,7 @@ export async function coalesceDuplicateStories(
   for (const cluster of clusters) {
     const canonical = cluster.canonical;
     const { primary, outlets, briefLabels } = resolveAndMerge(cluster, nameByDoc);
-    const card = buildAttachment(
-      primary,
-      resolveBrief(primary, feedConfig),
-      otherOutlets(outlets, primary),
-      briefLabels.slice(1),
-      canonical.created_at,
-    );
+    const card = buildStoryAttachment(primary, resolveBrief(primary, feedConfig), outlets, briefLabels.slice(1), canonical.created_at);
     const newHash = attachmentHash(card);
 
     if (res.changes.length < MAX_CHANGES_REPORTED) {

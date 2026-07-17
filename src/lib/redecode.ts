@@ -4,10 +4,10 @@ import type { SlackAttachment } from "@/lib/slack/format";
 import { parseWebhookPayload, isBroadcastMedium } from "@/lib/meltwater/parse";
 import { looksLikePerson } from "@/lib/meltwater/outlets";
 import { resolveBrief } from "@/lib/filter/engine";
-import { buildAttachment, attachmentHash, broadcastMediumLabel, sameText } from "@/lib/slack/format";
+import { buildStoryAttachment, attachmentHash, broadcastMediumLabel, sameText } from "@/lib/slack/format";
 import { updateSlack } from "@/lib/slack/post";
 import { resolveStationName } from "@/lib/meltwater/station-resolve";
-import { StoryStore, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
+import { StoryStore, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 
 export interface RedecodeChange {
@@ -82,13 +82,7 @@ export function resolveBroadcast(
 export function renderStoryCard(row: StoryRow, primary: NormalizedMention): { attachment: SlackAttachment; hash: string } {
   const outlets = JSON.parse(row.outlets_json) as Outlet[];
   const briefLabels = JSON.parse(row.brief_labels_json || "[]") as string[];
-  const attachment = buildAttachment(
-    primary,
-    resolveBrief(primary, feedConfig),
-    otherOutlets(outlets, primary),
-    briefLabels.slice(1),
-    row.created_at,
-  );
+  const attachment = buildStoryAttachment(primary, resolveBrief(primary, feedConfig), outlets, briefLabels.slice(1), row.created_at);
   return { attachment, hash: attachmentHash(attachment) };
 }
 

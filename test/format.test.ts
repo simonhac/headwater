@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildAttachment, buildPostPayload, broadcastMediumLabel } from "@/lib/slack/format";
+import { buildAttachment, buildStoryAttachment, buildPostPayload, broadcastMediumLabel } from "@/lib/slack/format";
+import { outletOf } from "@/lib/story";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { BriefRule } from "@/config/feed.config";
 
@@ -331,14 +332,15 @@ describe("buildAttachment — footer", () => {
     expect(buildAttachment(mention({ sentiment: "neutral" }), brief).footer).toContain("😐");
   });
 
-  it("appends 'also matched' and 'Also in' when provided", () => {
+  it("lists every outlet with its own reach (descending) plus 'also matched'", () => {
     const others = [
       { name: "The Age", url: "https://age.example/b", reach: 40000 },
-      { name: "SMH", url: "https://smh.example/c", reach: null },
+      { name: "SMH", url: "https://smh.example/c", reach: null }, // null reach → bare name, sorts last
     ];
-    const a = buildAttachment(mention(), brief, others, ["MPs", "Teals"]);
+    const a = buildAttachment(mention(), brief, others, ["MPs", "Teals"]); // masthead reach 480000
     expect(a.footer).toContain("also matched MPs, Teals");
-    expect(a.footer).toContain("Also in: The Age · SMH");
+    // combined uppercase, per-outlet lowercase; descending by reach; null-reach outlet bare.
+    expect(a.footer).toContain("3 outlets with 520K combined reach: The Australian (480k) · The Age (40k) · SMH");
   });
 
   it("replaces the single reach with '<N> outlets with <sum> combined reach' for multiple outlets", () => {
@@ -355,12 +357,12 @@ describe("buildAttachment — footer", () => {
     expect(a.footer).not.toContain("combined reach");
   });
 
-  it("caps 'Also in' at 8 outlets with a '+N more' suffix", () => {
+  it("caps the outlet list at 8 (including the masthead) with a '+N more' suffix", () => {
     const outlets = Array.from({ length: 10 }, (_, i) => ({ name: `Outlet${i + 1}`, url: null, reach: null }));
-    const a = buildAttachment(mention(), brief, outlets);
-    expect(a.footer).toContain("Outlet8");
-    expect(a.footer).not.toContain("Outlet9");
-    expect(a.footer).toContain("+2 more");
+    const a = buildAttachment(mention(), brief, outlets); // 11 total: masthead + 10; slice(0,8) = masthead + Outlet1..7
+    expect(a.footer).toContain("Outlet7");
+    expect(a.footer).not.toContain("Outlet8");
+    expect(a.footer).toContain("+3 more");
   });
 
   it("falls back to a broadcast title's air-time for the footer date when publishedAt is null", () => {
@@ -422,5 +424,42 @@ describe("buildPostPayload", () => {
     expect(Array.isArray(p.attachments)).toBe(true);
     expect((p.attachments as unknown[]).length).toBe(1);
     expect((p.attachments as { fallback: string }[])[0]!.fallback).toContain("The Australian");
+  });
+});
+
+describe("buildStoryAttachment — reach-led headline + '+ N others' header", () => {
+  it("leads with the highest-reach outlet (its own headline/masthead/link), demoting the anchor", () => {
+    const anchor = mention({ sourceName: "Small Local", url: "https://small.example/a", reach: 10000, title: "Anchor headline", snippet: "anchor snippet" });
+    const big = outletOf(mention({ sourceName: "Big Network", url: "https://big.example/b", reach: 900000, title: "Big headline", snippet: "big snippet", author: "Star Reporter" }));
+    const a = buildStoryAttachment(anchor, brief, [outletOf(anchor), big]);
+    expect(a.author_name).toContain("Big Network"); // masthead = the highest-reach outlet
+    expect(a.author_name).toContain("+ 1 others"); // count of the rest
+    expect(a.title).toBe("Big headline"); // its OWN headline
+    expect(a.title_link).toBe("https://big.example/b"); // its own link
+    expect(a.footer).toContain("Big Network (900k) · Small Local (10k)"); // descending, both listed
+  });
+
+  it("keeps the anchor as the lead on a reach tie (stability)", () => {
+    const anchor = mention({ sourceName: "Anchor", url: "https://a.example/a", reach: 50000, title: "Anchor headline" });
+    const tie = outletOf(mention({ sourceName: "Tie", url: "https://t.example/t", reach: 50000, title: "Tie headline" }));
+    const a = buildStoryAttachment(anchor, brief, [outletOf(anchor), tie]);
+    expect(a.title).toBe("Anchor headline");
+    expect(a.author_name).toContain("Anchor");
+  });
+
+  it("an old-shape outlet (no display fields) takes the MASTHEAD by reach, keeping the anchor's headline", () => {
+    const anchor = mention({ sourceName: "Anchor", url: "https://a.example/a", reach: 10000, title: "Anchor headline", snippet: "anchor snippet" });
+    const oldBig = { name: "Old Big", url: "https://old.example/o", reach: 999999 }; // no title/snippet keys
+    const a = buildStoryAttachment(anchor, brief, [outletOf(anchor), oldBig]);
+    expect(a.author_name).toContain("Old Big"); // masthead swaps to the higher-reach outlet
+    expect(a.title).toBe("Anchor headline"); // but the headline/snippet stay the anchor's (no per-outlet data)
+    expect(a.title_link).toBe("https://old.example/o"); // link points at the lead outlet
+  });
+
+  it("single outlet: no '+ N others', normal single-reach footer", () => {
+    const anchor = mention({ sourceName: "Solo", reach: 480000, title: "Solo headline" });
+    const a = buildStoryAttachment(anchor, brief, [outletOf(anchor)]);
+    expect(a.author_name).not.toContain("others");
+    expect(a.footer).toContain("480K reach");
   });
 });

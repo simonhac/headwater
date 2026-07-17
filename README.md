@@ -12,7 +12,7 @@ disabled), and posts it — replacing Meltwater's noisy built-in Slack feed.
 - **Tuning surface:** `src/config/feed.config.ts` (briefs, keywords, source allow/block, reach, media types)
 - **Broadcast station names:** radio/TV alerts don't carry the station — it's resolved from Meltwater's JS viewer and cached in D1 (see [Broadcast station names](#broadcast-station-names))
 - **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (exact dedupe), `stories` (one row per story = one Slack message: `slack_ts` + `channel`, outlet list, `simhash`/`media_type` for broadcast near-dup, `render_hash` for the redecode backfill), `broadcast_stations` + `station_names` (radio/TV station resolution), `ops_state` (heartbeat bookkeeping)
-- **Cloudflare resources:** **Workers** (the app), **D1** (all persistence above), and **Browser Rendering** (the `browser` binding — headless Chromium, used *only* for first-time station-name resolution; a few seconds per new station, well within the free 10 min/day)
+- **Cloudflare resources (all required to bring the system up):** **Workers** (the app + `scheduled()` cron triggers), **D1** (all persistence above), **Queues** (`INGEST_QUEUE` — the webhook enqueues each event id; the `queue()` consumer drains it one-at-a-time so ingestion is serial and the near-dup lookup never races — **needs the Workers Paid plan**), a **Durable Object** (`STATION_RENDERER` — the single serial station-render drainer; SQLite-backed, free-plan-ok), **Browser Rendering** (the `browser` binding — headless Chromium, used *only* for first-time station-name resolution; a few seconds per new station, well within the free 10 min/day), and **Cloudflare Access** (Zero Trust — gates `/inspect`+`/api`; see [Access & security model](#access--security-model)). Provisioning for each is in [Deploy to Cloudflare](#deploy-to-cloudflare).
 - **Inspect:** `GET /inspect` (Cloudflare Access) — recent events, raw payload, filter decision + reason, Block Kit preview
 - **Monitoring:** `GET /health` validates the runtime config (`configOk`); an hourly cron **heartbeat** alerts Slack if ingestion goes quiet (`src/lib/heartbeat.ts`)
 
@@ -154,12 +154,18 @@ what a station resolves to. The `/admin/redecode` backfill re-applies station na
 cards from the D1 map only (it never renders), so old clips upgrade once their station is known.
 
 ## Deploy to Cloudflare
-Browser Rendering needs no separate provisioning — the `browser` binding in `wrangler.jsonc` enables it
-(free tier: 10 min/day). Then:
+Browser Rendering and the Durable Object need no separate provisioning — the `browser` binding and the
+`durable_objects` + `migrations` blocks in `wrangler.jsonc` enable them on `deploy` (Browser Rendering
+free tier: 10 min/day). **Queues, however, must be created first and require the Workers Paid plan.** Then:
 ```bash
 npx wrangler login
 npx wrangler d1 create headwater               # paste the printed database_id into wrangler.jsonc
 pnpm db:migrate:remote
+
+# Queues (Workers Paid) — create both before the first deploy; the queues.producers/consumers in
+# wrangler.jsonc reference them by name. The DLQ is the parking lot for messages that exhaust retries.
+npx wrangler queues create headwater-ingest
+npx wrangler queues create headwater-ingest-dlq
 
 # secrets (prod) — set each with `wrangler secret put <NAME>`; where to get each value:
 npx wrangler secret put WEBHOOK_SHARED_SECRET   # webhook path token — generate: openssl rand -hex 32
@@ -256,7 +262,7 @@ with **no error** — deliveries are rejected before they're ever logged.
 - **Ingestion heartbeat** — an hourly cron (`triggers.crons` in `wrangler.jsonc` → `scheduled()` in
   `src/index.ts` → `src/lib/heartbeat.ts`) checks the newest `webhook_events` row **that parsed
   into a real mention** (so empty-body probes / health pings can't mask a stall) and posts a Slack
-  alert if nothing has arrived within `HEARTBEAT_MAX_SILENCE_HOURS` (default 3). It de-dupes via the
+  alert if nothing has arrived within `HEARTBEAT_MAX_SILENCE_HOURS` (default 24). It de-dupes via the
   `ops_state` table so a persistent stall pages at most once per `HEARTBEAT_REALERT_HOURS`
   (default 6) and re-arms once ingestion recovers. Trigger it on demand at `GET /admin/heartbeat`
   with `Authorization: Bearer <REPLAY_KEY>`.

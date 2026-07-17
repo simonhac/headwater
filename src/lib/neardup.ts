@@ -12,7 +12,7 @@ import { buildSketch, phraseNearDup, type PhraseSketch } from "@/lib/nearmatch";
 import { hammingDistance } from "@/lib/simhash";
 
 /** One side of a near-dup comparison — either an incoming mention or a stored story, reduced to the
- * four signals the predicate needs. */
+ * signals the predicate needs. */
 export interface NearDupSide {
   /** 64-bit SimHash fingerprint, or null when the text was too short to fingerprint. */
   fp: bigint | null;
@@ -20,17 +20,27 @@ export interface NearDupSide {
   sketch: PhraseSketch | null;
   /** Broadcast air-time (epoch ms) parsed from the title, or null when absent/unparseable. */
   airtime: number | null;
-  /** Lowercased media type, for the same-medium guard. */
+  /** Normalized media type ("television" collapsed to "tv"), for the same-medium guard. */
   mediaType: string;
+  /** Resolved station/outlet name, for the cross-media same-network exception (null when unknown). */
+  station: string | null;
 }
 
-/** The primary mention's title + snippet, recovered from a story row (null on any parse failure). */
-export function primaryOf(row: StoryRow): { title: string | null; snippet: string | null } {
+/** Normalize a media type for the same-medium guard: lowercased, with "television" collapsed to "tv"
+ * so an ABC clip tagged "tv" and one tagged "television" count as the same medium. */
+export function normMediaType(m: string | null | undefined): string {
+  const t = (m ?? "").toLowerCase();
+  return t === "television" ? "tv" : t;
+}
+
+/** The primary mention's title + snippet + resolved outlet name, recovered from a story row (nulls on
+ * any parse failure). */
+export function primaryOf(row: StoryRow): { title: string | null; snippet: string | null; sourceName: string | null } {
   try {
-    const p = JSON.parse(row.primary_mention_json) as { title?: string | null; snippet?: string | null };
-    return { title: p.title ?? null, snippet: p.snippet ?? null };
+    const p = JSON.parse(row.primary_mention_json) as { title?: string | null; snippet?: string | null; sourceName?: string | null };
+    return { title: p.title ?? null, snippet: p.snippet ?? null, sourceName: p.sourceName ?? null };
   } catch {
-    return { title: null, snippet: null };
+    return { title: null, snippet: null, sourceName: null };
   }
 }
 
@@ -49,8 +59,21 @@ export function sideForStory(row: StoryRow, cfg: NearDuplicateConfig): NearDupSi
     fp: row.simhash ? BigInt(row.simhash) : null,
     sketch: buildSketch(prim.snippet, cfg.containmentShingleSize),
     airtime: airtimeMs(prim.title),
-    mediaType: (row.media_type ?? "").toLowerCase(),
+    mediaType: normMediaType(row.media_type),
+    station: prim.sourceName,
   };
+}
+
+/** Do both station names contain the same configured network token (case-insensitive)? Used to waive
+ * the same-media-type guard for cross-media simulcasts (e.g. both contain "abc"). */
+export function sameCrossMediaNetwork(a: string | null, b: string | null, networks: string[] | undefined): boolean {
+  if (!a || !b || !networks?.length) return false;
+  const al = a.toLowerCase();
+  const bl = b.toLowerCase();
+  return networks.some((n) => {
+    const nl = n.toLowerCase();
+    return al.includes(nl) && bl.includes(nl);
+  });
 }
 
 export interface NearDupVerdict {
@@ -71,8 +94,12 @@ export interface NearDupVerdict {
  */
 export function isNearDupPair(a: NearDupSide, b: NearDupSide, cfg: NearDuplicateConfig): NearDupVerdict {
   const NO: NearDupVerdict = { match: false, fast: false, overlap: -1 };
-  // Guard 1 — same media type only (radio↔radio, tv↔tv).
-  if (a.mediaType !== b.mediaType) return NO;
+  // Guard 1 — same media type (radio↔radio, tv↔tv), EXCEPT a radio↔TV pair whose stations both belong
+  // to a configured network (e.g. an ABC simulcast); those still have to clear the phrase + air-time
+  // guards below, so only a genuine simulcast folds.
+  if (a.mediaType !== b.mediaType && !sameCrossMediaNetwork(a.station, b.station, cfg.crossMediaNetworks)) {
+    return NO;
+  }
   // Guard 2 — air-time proximity, only enforced when BOTH air-times parse.
   if (a.airtime !== null && b.airtime !== null && Math.abs(a.airtime - b.airtime) > cfg.maxAirtimeGapHours * 3_600_000) {
     return NO;

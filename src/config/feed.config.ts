@@ -57,6 +57,13 @@ export interface NearDuplicateConfig {
   maxAirtimeGapHours: number;
   /** Media types this applies to (case-insensitive substring match against a mention's mediaType). */
   mediaTypes: string[];
+  /**
+   * Network name substrings (case-insensitive) that WAIVE the same-media-type guard: a radio and a TV
+   * reading merge across media types only when BOTH station names contain one of these (e.g. an ABC
+   * News24 + ABC NewsRadio simulcast). The phrase-overlap + air-time guards still apply, so only a true
+   * simulcast folds. Empty = strict same-media only.
+   */
+  crossMediaNetworks: string[];
 }
 
 export interface FeedConfig {
@@ -100,6 +107,7 @@ export const feedConfig: FeedConfig = {
     containmentShingleSize: 5,
     maxAirtimeGapHours: 3,
     mediaTypes: ["radio", "tv", "television", "broadcast"],
+    crossMediaNetworks: ["abc"], // merge ABC TV↔radio simulcasts; add "sbs" etc. as needed
   },
   defaultBriefLabel: "Media Monitoring",
   briefs: [

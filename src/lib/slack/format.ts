@@ -224,17 +224,31 @@ export function buildAttachment(
   }
   fields.push({ title: "Organisation Brief", value: escapeMrkdwn(brief.label), short: true });
 
-  // footer: date · media type · sentiment · reach (+ "also matched …" and "Also in: …"). Plain
-  // text — Slack attachment footers don't render mrkdwn, so no pills here. When the story was
-  // carried by multiple outlets, the single reach is replaced by the outlet count + summed reach.
+  // footer: date · media type · sentiment · reach (+ "also matched …"). Plain text — Slack attachment
+  // footers don't render mrkdwn, so no pills. For a multi-outlet story the single reach is replaced by
+  // the outlet count + summed reach, then every outlet listed with its OWN reach, descending.
   let reachBit: string | null;
   if (otherOutlets.length) {
-    const count = otherOutlets.length + 1; // + the primary (headlined) outlet
-    const total = [m.reach, ...otherOutlets.map((o) => o.reach)]
+    const all = [{ name: masthead, reach: m.reach }, ...otherOutlets.map((o) => ({ name: o.name, reach: o.reach }))].sort(
+      (a, b) => (b.reach ?? -1) - (a.reach ?? -1),
+    );
+    const count = all.length;
+    const total = all
+      .map((o) => o.reach)
       .filter((r): r is number => typeof r === "number" && Number.isFinite(r) && r > 0)
       .reduce((a, b) => a + b, 0);
     const combined = compactReach(total);
-    reachBit = combined ? `${count} outlets with ${combined} combined reach` : `${count} outlets`;
+    const shown = all
+      .slice(0, 8)
+      .map((o) => {
+        const r = compactReach(o.reach)?.toLowerCase(); // per-outlet reach lowercased ("250k"); combined stays "2.6M"
+        return r ? `${o.name} (${r})` : o.name;
+      })
+      .join(" · ");
+    const more = all.length > 8 ? ` +${all.length - 8} more` : "";
+    reachBit = combined
+      ? `${count} outlets with ${combined} combined reach: ${shown}${more}`
+      : `${count} outlets: ${shown}${more}`;
   } else {
     reachBit = fmtReach(m.reach);
   }
@@ -253,18 +267,16 @@ export function buildAttachment(
     reachBit,
   ].filter((x): x is string => !!x);
   if (otherBriefLabels.length) footerBits.push(`also matched ${otherBriefLabels.join(", ")}`);
-  if (otherOutlets.length) {
-    const names = otherOutlets.map((o) => o.name);
-    const shown = names.slice(0, 8).join(" · ");
-    const more = names.length > 8 ? ` +${names.length - 8} more` : "";
-    footerBits.push(`Also in: ${shown}${more}`);
-  }
 
+  // Masthead shows the count of the other outlets — "9 Brisbane + 4 others". Stays inside the
+  // attachment and keeps the logo (author_icon); classic-attachment author_name is rendered fully bold,
+  // so "+ N others" is bold too (no partial-unbold without leaving the block / dropping the image).
+  const headMasthead = otherOutlets.length ? `${masthead} + ${otherOutlets.length} others` : masthead;
   const logo = sourceLogoUrl(m.sourceName, m.outletUrl ?? m.url);
   const att: SlackAttachment = {
     color: briefColor(brief),
     fallback: titleRepeatsMasthead ? masthead : `${masthead}: ${title}`,
-    author_name: logo ? masthead : `${mediaTypeEmoji(m.mediaType)} ${masthead}`,
+    author_name: logo ? headMasthead : `${mediaTypeEmoji(m.mediaType)} ${headMasthead}`,
     // Keep `title` in its original position for the common (non-repeat) case so the attachment hash
     // of every existing card stays stable — only the collapsed broadcast cards should re-render.
     ...(titleRepeatsMasthead ? {} : { title }),
@@ -279,6 +291,65 @@ export function buildAttachment(
   if (text) att.text = text;
   if (footerBits.length) att.footer = footerBits.join("  ·  ");
   return att;
+}
+
+/** Reconstruct a headline-capable mention from a stored outlet that is taking the lead by reach. Starts
+ * from the anchor (so an OLD-shape `{name,url,reach}` outlet cleanly swaps only the masthead + link,
+ * keeping the anchor's headline/snippet/byline/keywords), then overrides each display field the outlet
+ * actually carries (new-shape → its OWN headline/snippet/byline lead). `raw` is null (never reparsed). */
+function mentionFromOutlet(o: Outlet, anchor: NormalizedMention): NormalizedMention {
+  return {
+    ...anchor,
+    sourceName: o.name, // masthead
+    url: o.url, // headline link
+    reach: o.reach,
+    outletUrl: o.outletUrl ?? null,
+    raw: null,
+    ...(o.title !== undefined ? { title: o.title } : {}),
+    ...(o.snippet !== undefined ? { snippet: o.snippet } : {}),
+    ...(o.author !== undefined ? { author: o.author } : {}),
+    ...(o.mediaType !== undefined ? { mediaType: o.mediaType } : {}),
+    ...(o.sentiment !== undefined ? { sentiment: o.sentiment } : {}),
+    ...(o.publishedAt !== undefined ? { publishedAt: o.publishedAt } : {}),
+    ...(o.matchedKeywords !== undefined ? { matchedKeywords: o.matchedKeywords } : {}),
+  };
+}
+
+/**
+ * Build a story card whose HEADLINE outlet is the highest-reach one, not necessarily the near-dup
+ * anchor. `anchor` is the story's stable first mention (from `primary_mention_json`); `outlets` is the
+ * full stored outlet list (including the anchor's own entry). The lead is the max-reach member (ties →
+ * anchor, so cards stay stable); the rest — including the demoted anchor — become the footer outlet
+ * list. A new-shape lead brings its own headline/snippet; an old-shape lead swaps only the masthead +
+ * link and keeps the anchor's headline/snippet. The anchor's own entry is matched out by url/name so it
+ * isn't double-listed.
+ */
+export function buildStoryAttachment(
+  anchor: NormalizedMention,
+  brief: BriefRule,
+  outlets: Outlet[],
+  otherBriefLabels: string[] = [],
+  receivedAtMs: number | null = null,
+): SlackAttachment {
+  const anchorName = (anchor.sourceName ?? "").toLowerCase();
+  const isAnchorEntry = (o: Outlet) => (anchor.url != null && o.url === anchor.url) || o.name.toLowerCase() === anchorName;
+
+  // Lead = max reach among the anchor and the non-anchor outlets; anchor wins ties (stability).
+  let leadMention = anchor;
+  let leadEntry: Outlet | null = null; // the outlet chosen as lead (null ⇒ the anchor leads)
+  let bestReach = anchor.reach ?? -1;
+  for (const o of outlets) {
+    if (isAnchorEntry(o)) continue;
+    if ((o.reach ?? -1) > bestReach) {
+      bestReach = o.reach ?? -1;
+      leadEntry = o;
+      leadMention = mentionFromOutlet(o, anchor);
+    }
+  }
+
+  // The footer's "other outlets" = everything except whichever entry is now the headline.
+  const rest = outlets.filter((o) => (leadEntry ? o !== leadEntry : !isAnchorEntry(o)));
+  return buildAttachment(leadMention, brief, rest, otherBriefLabels, receivedAtMs);
 }
 
 /**

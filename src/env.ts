@@ -14,6 +14,12 @@ export interface Env {
    * without the binding type-check (enqueue/poke no-op when absent). */
   STATION_RENDERER?: DurableObjectNamespace<StationRenderer>;
 
+  /** Sequential ingestion queue (wrangler.jsonc queues.producers). The webhook handler enqueues the
+   * archived event id; the queue() consumer drains it one-at-a-time (max_concurrency=1) so every
+   * near-dup lookup sees all prior stories. Optional so hand-built test envs type-check; a missing
+   * binding degrades the handler to the in-request waitUntil path (local dev / tests). */
+  INGEST_QUEUE?: Queue<string>;
+
   // --- non-secret vars (wrangler.jsonc) ---
   /** "true" to actually post to Slack. Stays "false" until the payload is confirmed + a bot token is wired. */
   POSTING_ENABLED: string;
@@ -36,7 +42,7 @@ export interface Env {
   REPLAY_KEY?: string;
 
   // --- ingestion heartbeat (all optional; sensible defaults in src/lib/heartbeat.ts) ---
-  /** Alert if no webhook has arrived in this many hours (default 3). */
+  /** Alert if no webhook has arrived in this many hours (default 24). */
   HEARTBEAT_MAX_SILENCE_HOURS?: string;
   /** While a stall persists, re-alert at most once per this many hours (default 6). */
   HEARTBEAT_REALERT_HOURS?: string;

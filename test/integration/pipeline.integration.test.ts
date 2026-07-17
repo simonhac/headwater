@@ -4,7 +4,7 @@ import { processEvent } from "@/lib/process";
 import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
 
-function newsPayload(overrides: { url?: string; source?: string } = {}) {
+function newsPayload(overrides: { url?: string; source?: string; reach?: number } = {}) {
   return {
     search_name: "Key People",
     documents: [
@@ -14,7 +14,7 @@ function newsPayload(overrides: { url?: string; source?: string } = {}) {
         source_name: overrides.source ?? "The Australian",
         source_information_type: "news",
         source_country_code: "AU",
-        source_reach: 480000,
+        source_reach: overrides.reach ?? 480000,
         document_opening_text: "A renewable policy shift, reported today.",
       },
     ],
@@ -114,6 +114,23 @@ describe("processEvent (real D1 + mocked Slack)", () => {
     const outlets = await env.DB.prepare("SELECT outlets_json FROM stories").first<{ outlets_json: string }>();
     const names = (JSON.parse(outlets!.outlets_json) as { name: string }[]).map((o) => o.name);
     expect(names).toEqual(["The Australian", "The Age"]);
+  });
+
+  it("stores per-outlet display data on a fold so a higher-reach outlet can lead; anchor stays the near-dup primary", async () => {
+    await run("e1", newsPayload({ source: "Small Local", reach: 10000 }));
+    calls = [];
+    await run("e5", newsPayload({ url: "https://y.example/big", source: "Big Network", reach: 900000 }));
+    expect(await count("stories")).toBe(1);
+    expect(calls.some((u) => u.includes("chat.update"))).toBe(true);
+
+    const row = await env.DB.prepare("SELECT primary_mention_json, outlets_json FROM stories").first<{ primary_mention_json: string; outlets_json: string }>();
+    // Near-dup anchor (story identity/simhash) stays the FIRST mention, not the higher-reach one.
+    expect((JSON.parse(row!.primary_mention_json) as { sourceName: string }).sourceName).toBe("Small Local");
+    // Outlets now carry display fields (snippet), so buildStoryAttachment can lead with Big Network.
+    const outlets = JSON.parse(row!.outlets_json) as { name: string; reach: number | null; snippet?: string }[];
+    expect(outlets.map((o) => o.name)).toEqual(["Small Local", "Big Network"]);
+    expect(outlets.every((o) => "snippet" in o)).toBe(true);
+    expect(outlets.find((o) => o.name === "Big Network")!.reach).toBe(900000);
   });
 
   it("broadcast: folds a same-reading segment from another station into one card (phrase overlap)", async () => {

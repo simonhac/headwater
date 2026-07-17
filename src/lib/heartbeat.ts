@@ -8,7 +8,7 @@ const HOUR_MS = 60 * 60 * 1000;
 /** ops_state key holding the epoch-ms of the last stall alert we posted (for re-alert throttling). */
 export const LAST_ALERT_KEY = "heartbeat:last_stall_alert_at";
 
-const DEFAULT_MAX_SILENCE_HOURS = 3;
+const DEFAULT_MAX_SILENCE_HOURS = 24;
 const DEFAULT_REALERT_HOURS = 6;
 
 /** Pure decision: given the latest receipt time and last-alert marker, is ingestion healthy and

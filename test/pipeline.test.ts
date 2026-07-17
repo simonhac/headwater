@@ -26,6 +26,7 @@ const cfg: FeedConfig = {
     containmentShingleSize: 5,
     maxAirtimeGapHours: 3,
     mediaTypes: ["radio", "tv"],
+    crossMediaNetworks: [],
   },
   defaultBriefLabel: "Media",
   briefs: [{ id: "kp", label: "Key People", matchNames: ["key people"], keywords: ["renewable", "Ross Garnaut"] }],
@@ -156,14 +157,15 @@ describe("format", () => {
     expect(p.attachments[0].fallback).toContain("The Australian");
   });
 
-  it("appends 'Also in' and 'also matched' to the footer", () => {
+  it("lists the outlets with reach and appends 'also matched' to the footer", () => {
     const { kept } = applyFilters(parseWebhookPayload(payload), cfg);
     const others = [
       { name: "The Age", url: "https://age.example/b", reach: null },
       { name: "SMH", url: "https://smh.example/c", reach: null },
     ];
     const a = buildAttachment(kept[0]!.mention, kept[0]!.brief, others, ["MPs", "Teals"]);
-    expect(a.footer).toContain("Also in: The Age · SMH");
+    expect(a.footer).toMatch(/3 outlets/); // masthead + the two others
+    expect(a.footer).toContain("The Age · SMH"); // null-reach outlets: bare names, last
     expect(a.footer).toContain("also matched MPs, Teals");
   });
 });

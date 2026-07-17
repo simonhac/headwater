@@ -40,6 +40,24 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Sequential ingestion. The webhook handler enqueues each archived event id; the queue() consumer
+  // drains them. `max_concurrency: 1` is the correctness knob — exactly one consumer invocation runs
+  // at a time across the whole queue, so no two processEvent() calls overlap and the near-dup lookup
+  // never races (fixes simulcast-burst duplicate cards). Requires: `wrangler queues create
+  // headwater-ingest` and `wrangler queues create headwater-ingest-dlq` before the first deploy.
+  "queues": {
+    "producers": [{ "queue": "headwater-ingest", "binding": "INGEST_QUEUE" }],
+    "consumers": [
+      {
+        "queue": "headwater-ingest",
+        "max_concurrency": 1,
+        "max_batch_size": 25,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "headwater-ingest-dlq"
+      }
+    ]
+  },
   "triggers": {
     // Two scheduled jobs (dispatched by controller.cron in scheduled(), src/index.ts):
     // - "*/15 * * * *" — self-healing reconcile: re-run the recent archive window so un-posted

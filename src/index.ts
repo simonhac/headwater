@@ -7,6 +7,7 @@ import { processEvent } from "@/lib/process";
 import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
 import { coalesceDuplicateStories } from "@/lib/coalesce";
+import { sweepOrphans } from "@/lib/orphans";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
 import { pokeStationRender, getRenderState } from "@/do/client";
 import { backfillStations } from "@/lib/backfill";
@@ -98,7 +99,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env));
   return c.json({
     service: "headwater",
-    build: "headwater-11", // bump on each deploy to confirm the running code
+    build: "headwater-13", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
@@ -145,14 +146,27 @@ app.post("/webhooks/meltwater/:token", async (c) => {
     return c.text("archive_failed", 500);
   }
 
-  // Ack immediately; do parse/filter/post after the response (Workers' after-response primitive).
+  // Ack immediately; the queue consumer does parse/filter/post SEQUENTIALLY (max_concurrency=1), so
+  // every near-dup lookup sees all prior stories (kills the simulcast-burst duplicate race). Message =
+  // just the id; webhook_events is the source of truth (the consumer re-reads raw_json by id).
   if (!parseError) {
-    const seen = new SeenStore(c.env.DB);
-    c.executionCtx.waitUntil(
-      processEvent(c.env, eventLog, seen, id, payload, receivedAt).catch(async (e) => {
-        await eventLog.markProcessed(id, { decision: "error", error: String(e) }).catch(() => {});
-      }),
-    );
+    if (c.env.INGEST_QUEUE) {
+      try {
+        await c.env.INGEST_QUEUE.send(id);
+      } catch (e) {
+        // Archived-but-not-enqueued: the payload is safe, so don't 5xx (that would trigger a
+        // redundant sender re-POST). The 15-min reconcile re-drives this row (seen-aware, no double-post).
+        console.error(`[ingest] enqueue failed for ${id} (reconcile will catch it): ${String(e)}`);
+      }
+    } else {
+      // No queue binding (local dev / tests): process after the response, as before.
+      const seen = new SeenStore(c.env.DB);
+      c.executionCtx.waitUntil(
+        processEvent(c.env, eventLog, seen, id, payload, receivedAt).catch(async (e) => {
+          await eventLog.markProcessed(id, { decision: "error", error: String(e) }).catch(() => {});
+        }),
+      );
+    }
   }
 
   return c.text("ok", 200);
@@ -228,6 +242,25 @@ app.post("/admin/coalesce", async (c) => {
   try {
     const result = await coalesceDuplicateStories(c.env, { hours, dryRun, now: Date.now() });
     return c.json(result);
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
+// --- admin: delete orphan cards — the bot's own attachment-bearing messages whose ts has no backing
+// `stories` row (left when a story row was removed but its Slack message wasn't). Heartbeat/text posts
+// are never touched. Gated by REPLAY_KEY; `dryRun=1` previews; capped at 40 deletes/call (re-run until
+// `remaining` is 0). ---
+app.post("/admin/orphans", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const dryRun = c.req.query("dryRun") === "1";
+  if (!dryRun && c.env.POSTING_ENABLED !== "true") {
+    return c.text("POSTING_ENABLED is not true (use dryRun=1 to preview)", 409);
+  }
+  try {
+    return c.json(await sweepOrphans(c.env, { dryRun }));
   } catch (e) {
     return c.json({ error: String(e) }, 500);
   }
@@ -326,4 +359,37 @@ export default {
       );
     }
   },
-} satisfies ExportedHandler<Env>;
+  // Sequential ingestion consumer (wrangler.jsonc queues.consumers, max_concurrency=1). One batch runs
+  // at a time across the whole queue, and each message is awaited in order below, so no two
+  // processEvent() calls ever overlap — every near-dup lookup sees all prior committed stories.
+  async queue(batch: MessageBatch<string>, env: Env, _ctx: ExecutionContext): Promise<void> {
+    const eventLog = new EventLog(env.DB);
+    const seen = new SeenStore(env.DB);
+    for (const msg of batch.messages) {
+      const id = msg.body;
+      try {
+        const row = await eventLog.get(id); // raw_json + received_at, archived at ingest
+        if (!row) {
+          msg.ack(); // archived row pruned/gone — nothing to deliver
+          continue;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(row.raw_json);
+        } catch {
+          msg.ack(); // non-JSON body: archived as error, never processable
+          continue;
+        }
+        await processEvent(env, eventLog, seen, id, payload, row.received_at);
+        msg.ack();
+      } catch (e) {
+        // Unexpected throw (e.g. D1). Record it for /inspect drift, then retry — idempotent +
+        // seen-aware, so a redelivery just re-drives it. (A Slack failure does NOT throw here;
+        // processEvent records failed>0 internally and returns, so those ack and heal via reconcile.)
+        console.error(`[queue] processing failed for ${id}: ${String(e)}`);
+        await eventLog.markProcessed(id, { decision: "error", error: String(e) }).catch(() => {});
+        msg.retry();
+      }
+    }
+  },
+} satisfies ExportedHandler<Env, string>;

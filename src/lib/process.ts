@@ -4,13 +4,13 @@ import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
 import { parseWebhookPayload } from "@/lib/meltwater/parse";
 import { applyFilters, resolveBrief } from "@/lib/filter/engine";
-import { buildAttachment, buildPostPayload, attachmentHash } from "@/lib/slack/format";
+import { buildAttachment, buildStoryAttachment, buildPostPayload, attachmentHash } from "@/lib/slack/format";
 import { postToSlack, updateSlack } from "@/lib/slack/post";
-import { StoryStore, storyKey, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
+import { StoryStore, storyKey, outletOf, addOutlet, addBriefLabel, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 import { simhash64 } from "@/lib/simhash";
 import { buildSketch, type PhraseSketch } from "@/lib/nearmatch";
-import { isNearDupPair, sideForStory, airtimeMs, type NearDupSide } from "@/lib/neardup";
+import { isNearDupPair, sideForStory, airtimeMs, normMediaType, type NearDupSide } from "@/lib/neardup";
 import { stationCodeFor, viewerUrlForRaw } from "@/lib/meltwater/station-resolve";
 import { stationNameForCode, upsertStationName } from "@/lib/meltwater/stations";
 import { looksLikePerson } from "@/lib/meltwater/outlets";
@@ -54,11 +54,6 @@ export interface ProcessSummary {
   results: DocResult[];
 }
 
-const outletOf = (m: NormalizedMention): Outlet => ({
-  name: m.sourceName ?? "Unknown source",
-  url: m.url,
-  reach: m.reach,
-});
 
 /**
  * Resolve a broadcast item's station WITHOUT rendering (rendering is deferred to the StationRenderer
@@ -121,7 +116,9 @@ async function findNearDup(
     fp,
     sketch,
     airtime: airtimeMs(mention.title),
-    mediaType: (mention.mediaType ?? "").toLowerCase(),
+    mediaType: normMediaType(mention.mediaType),
+    // Station resolved before this call (resolveBroadcastOutlet), so an ABC simulcast is identifiable.
+    station: mention.sourceName,
   };
 
   let best: StoryRow | null = null;
@@ -230,7 +227,7 @@ export async function processEvent(
       const briefLabels = addBriefLabel(JSON.parse(existing.brief_labels_json || "[]") as string[], brief.label);
       const primary = JSON.parse(existing.primary_mention_json) as NormalizedMention;
       const primaryBrief = resolveBrief(primary, feedConfig);
-      const mergedCard = buildAttachment(primary, primaryBrief, otherOutlets(outlets, primary), briefLabels.slice(1), existing.created_at);
+      const mergedCard = buildStoryAttachment(primary, primaryBrief, outlets, briefLabels.slice(1), existing.created_at);
       const upd = await updateSlack(env, { channel: existing.channel, ts: existing.slack_ts, attachments: [mergedCard] });
       // Only commit state when the update landed — mirror the post path. A failed update leaves the
       // mention un-`seen` and un-counted so a replay/reconcile retries it (the G1 fix). Committing
