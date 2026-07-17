@@ -97,7 +97,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env));
   return c.json({
     service: "headwater",
-    build: "headwater-10", // bump on each deploy to confirm the running code
+    build: "headwater-11", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
