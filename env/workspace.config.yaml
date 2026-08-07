@@ -1,0 +1,9 @@
+# headwater workspace setup/run — driven by @simon/workspace-env.
+# Cloudflare Worker: op inject the committed .dev.vars.tpl -> .dev.vars (which
+# `wrangler dev` reads) from the headwater-dev vault via op-sa-headwater-dev.
+project: headwater
+setup:
+  - { phase: opInjectEnv, tpl: .dev.vars.tpl, target: .dev.vars }
+  - verify
+run:
+  command: pnpm dev   # wrangler dev (Cloudflare picks the port; no fixed range)
