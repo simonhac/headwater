@@ -49,8 +49,31 @@ export function normalizeTitle(title: string): string {
 /** Story identity, scoped to the channel it was posted in: `"<channel>|<sha256(normalized title)>"`.
  * The same headline fanned out to two channels is two stories with two Slack messages — folding them
  * would mean one card living in one channel only. Migration 0010 re-keyed the legacy bare-hash rows. */
-export async function storyKey(channel: string, title: string): Promise<string> {
+/**
+ * Identity of a headline within a channel — everything but the posting instance.
+ *
+ * Kept separate from the full key because the two are asked different questions: this prefix
+ * answers "is there a card for this headline?", while the full key identifies ONE card.
+ */
+export async function storyKeyPrefix(channel: string, title: string): Promise<string> {
   return `${channel}|${await sha256Hex(normalizeTitle(title))}`;
+}
+
+/**
+ * The primary key of one posted card: `"<channel>|<sha256(title)>|<createdAt>"`.
+ *
+ * The creation timestamp is what stops a headline that recurs OUTSIDE the syndication window from
+ * orphaning its predecessor. Before it, the key was eternal while the merge lookup was windowed, so
+ * a repeat >72h later found nothing to merge into, posted a fresh card, and then collided on INSERT
+ * — `ON CONFLICT DO UPDATE` silently repointed the row at the new message and cut the old card
+ * loose. (That was 16 of the 17 orphans swept on 2026-09-08.) Distinct keys let both rows coexist,
+ * so every card keeps a row and stays in the orphan sweep's allow-list.
+ *
+ * `createdAtMs` must be the event's `received_at`, never `Date.now()`, so a replay recomputes the
+ * SAME key and re-merges instead of duplicating.
+ */
+export function storyKeyAt(prefix: string, createdAtMs: number): string {
+  return `${prefix}|${createdAtMs}`;
 }
 
 /** Build the stored Outlet for a mention, capturing the display fields so a high-reach outlet can lead
@@ -95,11 +118,23 @@ export function otherOutlets(outlets: Outlet[], primary: { sourceName: string | 
 export class StoryStore {
   constructor(private db: D1Database) {}
 
-  /** A story is only mergeable if it was updated within the window (else it's a fresh story). */
-  async getFresh(key: string, sinceMs: number): Promise<StoryRow | null> {
+  /**
+   * The newest mergeable card for a headline in a channel, or null. A story is only mergeable if it
+   * was updated within the window; an older one is left alone as history rather than overwritten.
+   *
+   * Matched on the `"<channel>|<hash>"` prefix via a range scan (`|` is 0x7C, `}` is 0x7D), which
+   * uses the primary-key index — unlike `LIKE 'prefix%'`, which SQLite only optimises when
+   * `case_sensitive_like` is on. The range also spans pre-0011 two-part keys, so a row the
+   * migration somehow missed is still found rather than silently duplicated.
+   */
+  async getFresh(prefix: string, sinceMs: number): Promise<StoryRow | null> {
     return await this.db
-      .prepare(`SELECT * FROM stories WHERE story_key = ? AND updated_at >= ?`)
-      .bind(key, sinceMs)
+      .prepare(
+        `SELECT * FROM stories
+          WHERE story_key >= ?1 AND story_key < ?2 AND updated_at >= ?3
+          ORDER BY created_at DESC LIMIT 1`,
+      )
+      .bind(prefix, `${prefix}}`, sinceMs)
       .first<StoryRow>();
   }
 

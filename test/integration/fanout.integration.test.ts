@@ -9,7 +9,7 @@ import { processEvent } from "@/lib/process";
 import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
 import { saveRouting, type Routing } from "@/lib/routing";
-import { storyKey } from "@/lib/story";
+import { storyKeyAt, storyKeyPrefix } from "@/lib/story";
 import { sha256Hex } from "@/lib/ids";
 import { replayArchivedEvents } from "@/lib/replay";
 
@@ -105,9 +105,13 @@ describe("multi-channel fanout (real D1 + mocked Slack)", () => {
 
     const rows = await storyRows();
     expect(rows.map((r) => r.channel).sort()).toEqual([DEFAULT_CH, VIC_CH]);
-    // Same title → same hash, different channel prefix.
+    // Same title → same hash, different channel prefix; the instance suffix is the event's
+    // received_at, so both keys are fully determined.
     expect(rows.map((r) => r.story_key).sort()).toEqual(
-      [await storyKey(DEFAULT_CH, TITLE), await storyKey(VIC_CH, TITLE)].sort(),
+      [
+        storyKeyAt(await storyKeyPrefix(DEFAULT_CH, TITLE), RECEIVED_AT),
+        storyKeyAt(await storyKeyPrefix(VIC_CH, TITLE), RECEIVED_AT),
+      ].sort(),
     );
     // Each channel got its own Slack ts, so a later merge updates the right message.
     expect(new Set(rows.map((r) => r.slack_ts)).size).toBe(2);
@@ -221,12 +225,68 @@ describe("multi-channel fanout (real D1 + mocked Slack)", () => {
     expect(res.purgeNote).toContain(VIC_CH);
   });
 
+  describe("a headline that recurs outside the syndication window (migration 0011)", () => {
+    const WEEK_LATER = RECEIVED_AT + 8 * 24 * 60 * 60 * 1000;
+
+    it("posts a second card and KEEPS the first row, instead of orphaning it", async () => {
+      // The pre-0011 bug: story_key was eternal but the merge lookup was windowed (72h), so a
+      // repeat found nothing to merge into, posted a fresh card, then collided on INSERT — and
+      // ON CONFLICT DO UPDATE repointed the row at the new message, cutting the old card loose
+      // with nothing in D1 referencing it. That produced 16 of 17 orphans in production.
+      await route({ "vic-election-2026": [DEFAULT_CH] });
+
+      expect((await run("e1", vic())).posted).toBe(1);
+      const first = await storyRows();
+      expect(first).toHaveLength(1);
+
+      // A DIFFERENT article carrying the same headline — which is how this arises in production
+      // (a wire story rerun weeks later). Reusing the url would be caught by `seen` long before
+      // the story lookup, and would test nothing.
+      expect((await run("e2", vic({ article: "https://vic.example/b" }), WEEK_LATER)).posted).toBe(1);
+      const both = await storyRows();
+
+      // Two rows, two distinct Slack messages, and the ORIGINAL ts is still referenced — which is
+      // exactly what keeps the first card out of the orphan sweep.
+      expect(both).toHaveLength(2);
+      expect(new Set(both.map((r) => r.slack_ts)).size).toBe(2);
+      expect(both.map((r) => r.slack_ts)).toContain(first[0]!.slack_ts);
+      // Same headline + channel ⇒ same prefix; only the instance suffix differs.
+      const prefix = await storyKeyPrefix(DEFAULT_CH, TITLE);
+      expect(both.every((r) => r.story_key.startsWith(`${prefix}|`))).toBe(true);
+      expect(both.map((r) => r.story_key).sort()).toEqual(
+        [storyKeyAt(prefix, RECEIVED_AT), storyKeyAt(prefix, WEEK_LATER)].sort(),
+      );
+    });
+
+    it("still merges a repeat INSIDE the window into the existing card", async () => {
+      // The fix must not cost us syndication merging — the whole point of the windowed lookup.
+      await route({ "vic-election-2026": [DEFAULT_CH] });
+      await run("e1", vic());
+      const summary = await run("e2", vic({ outlet: "The Herald Sun", article: "https://heraldsun.test/x" }), RECEIVED_AT + 60_000);
+      expect(summary.merged).toBe(1);
+      expect(await storyRows()).toHaveLength(1); // folded in, no second row
+    });
+
+    it("picks the NEWEST card when several exist for the same headline", async () => {
+      await route({ "vic-election-2026": [DEFAULT_CH] });
+      await run("e1", vic());
+      await run("e2", vic({ article: "https://vic.example/b" }), WEEK_LATER);
+      const rows = await storyRows();
+      const newest = rows.find((r) => r.story_key.endsWith(String(WEEK_LATER)))!;
+
+      // A third mention an hour after the second must fold into the SECOND card, not the first.
+      await run("e3", vic({ outlet: "The Herald Sun", article: "https://heraldsun.test/y" }), WEEK_LATER + 3_600_000);
+      const updates = posts.filter((p) => p.method === "chat.update");
+      expect(updates.at(-1)!.ts).toBe(newest.slack_ts);
+    });
+  });
+
   describe("legacy cutover (migration 0010)", () => {
     /** The pre-fanout state: a bare-hash story_key and a channel-less seen key. */
     async function seedLegacy(payload: ReturnType<typeof vic>, briefId: string) {
       const canonical = payload.links.article;
       const legacySeen = await sha256Hex(`${briefId}|${canonical}`);
-      const bareKey = (await storyKey(DEFAULT_CH, payload.title)).split("|")[1]!;
+      const bareKey = (await storyKeyPrefix(DEFAULT_CH, payload.title)).split("|")[1]!;
       await env.DB.prepare(
         `INSERT INTO stories (story_key, slack_ts, channel, brief_label, primary_mention_json, outlets_json,
            brief_labels_json, simhash, media_type, render_hash, created_at, updated_at)

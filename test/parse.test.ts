@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseWebhookPayload } from "@/lib/meltwater/parse";
+import { parseWebhookPayload, tidySnippet } from "@/lib/meltwater/parse";
 import { mastheadForDomain, hostnameOf, deriveOutletName, looksLikePerson } from "@/lib/meltwater/outlets";
 import { docIdFromLinks } from "@/lib/meltwater/station-resolve";
 import type { NormalizedMention } from "@/lib/meltwater/types";
@@ -436,5 +436,45 @@ describe("parseWebhookPayload — defensive extraction", () => {
       documents: [{ source_name: "X", document_publish_date: "2026-07-08T08:30:00+10:00" }],
     });
     expect(m!.publishedAt).toBe("2026-07-07T22:30:00.000Z"); // +10:00 → 22:30Z the previous day
+  });
+});
+
+describe("tidySnippet", () => {
+  it("drops a severed sentence-ending mark, leaving a clean sentence start", () => {
+    expect(tidySnippet(". The message we will send is that there is no consequence")).toBe(
+      "The message we will send is that there is no consequence",
+    );
+    expect(tidySnippet("? So many of the stations we listen to")).toBe("So many of the stations we listen to");
+    expect(tidySnippet("! Right then")).toBe("Right then");
+  });
+
+  it("marks a severed clause with an ellipsis — the reader IS mid-thought", () => {
+    expect(tidySnippet(", Mums for Nuclear. There's a whole lot of them")).toBe(
+      "…Mums for Nuclear. There's a whole lot of them",
+    );
+    expect(tidySnippet(": Issue 657 August 1")).toBe("…Issue 657 August 1");
+    expect(tidySnippet("; and then some")).toBe("…and then some");
+  });
+
+  it("leaves Meltwater's own leading ellipsis alone", () => {
+    // 679 of 1441 production snippets start this way — it's their truncation marker, not a defect.
+    expect(tidySnippet("...the legislation, now before a Senate inquiry")).toBe(
+      "...the legislation, now before a Senate inquiry",
+    );
+    expect(tidySnippet("…already elided")).toBe("…already elided");
+  });
+
+  it("leaves ordinary text untouched", () => {
+    expect(tidySnippet("The premier said today")).toBe("The premier said today");
+    expect(tidySnippet("1.5 degrees of warming")).toBe("1.5 degrees of warming");
+    // A decimal or abbreviation must not be mistaken for a severed sentence: the rule requires
+    // whitespace after the mark.
+    expect(tidySnippet(".NET developers")).toBe(".NET developers");
+  });
+
+  it("passes null/empty straight through", () => {
+    expect(tidySnippet(null)).toBeNull();
+    expect(tidySnippet("")).toBe("");
+    expect(tidySnippet(". ")).toBeNull();
   });
 });

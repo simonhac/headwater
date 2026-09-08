@@ -4,7 +4,7 @@ import { applyFilters } from "@/lib/filter/engine";
 import { highlightKeywordsAsCode, buildMentionsLine, truncate, escapeMrkdwn } from "@/lib/slack/highlight";
 import { buildAttachment, buildPostPayload, briefColor, fmtFriendly, fmtReach, cleanTitle } from "@/lib/slack/format";
 import { sourceLogoUrl, faviconUrl, mediaTypeEmoji } from "@/lib/slack/icons";
-import { normalizeTitle, storyKey, addOutlet, addBriefLabel, type Outlet } from "@/lib/story";
+import { normalizeTitle, storyKeyAt, storyKeyPrefix, addOutlet, addBriefLabel, type Outlet } from "@/lib/story";
 import { simhash64, hammingDistance, tokenize, shingles } from "@/lib/simhash";
 import { DEFAULT_BRIEF_COLOR, type FeedConfig } from "@/config/feed.config";
 
@@ -261,14 +261,14 @@ describe("icons", () => {
 describe("syndication", () => {
   it("normalizes titles so verbatim republications share a key", async () => {
     expect(normalizeTitle("Zero chance: Nats & Libs!")).toBe("zero chance nats libs");
-    const a = await storyKey("C1", "Zero chance: Nats & Libs!");
-    const b = await storyKey("C1", "zero chance   nats  libs");
+    const a = await storyKeyPrefix("C1", "Zero chance: Nats & Libs!");
+    const b = await storyKeyPrefix("C1", "zero chance   nats  libs");
     expect(a).toBe(b);
   });
 
   it("scopes the story key to the channel, so a fanned-out headline is two stories", async () => {
-    const a = await storyKey("C1", "Zero chance");
-    const b = await storyKey("C2", "Zero chance");
+    const a = await storyKeyPrefix("C1", "Zero chance");
+    const b = await storyKeyPrefix("C2", "Zero chance");
     expect(a).not.toBe(b);
     expect(a).toMatch(/^C1\|[0-9a-f]{64}$/);
     expect(b).toBe(`C2|${a.slice("C1|".length)}`); // same hash, different prefix
@@ -280,5 +280,27 @@ describe("syndication", () => {
     outlets = addOutlet(outlets, { name: "the australian", url: "https://c", reach: 3 }); // same name
     outlets = addOutlet(outlets, { name: "SMH", url: "https://a", reach: 4 }); // same url
     expect(outlets.map((o) => o.name)).toEqual(["The Australian", "The Age"]);
+  });
+});
+
+describe("storyKeyAt — the posting instance", () => {
+  it("gives two postings of the same headline different keys", async () => {
+    // The bug this fixes: one eternal key + a windowed merge lookup meant a headline recurring
+    // after 72h posted a fresh card, collided on INSERT, and orphaned its predecessor.
+    const prefix = await storyKeyPrefix("C1", "Pollies return to kitchen table");
+    expect(storyKeyAt(prefix, 1_000)).not.toBe(storyKeyAt(prefix, 2_000));
+  });
+
+  it("is stable for a given (headline, channel, receivedAt), so a replay re-merges", async () => {
+    const prefix = await storyKeyPrefix("C1", "Pollies return to kitchen table");
+    expect(storyKeyAt(prefix, 1_000)).toBe(storyKeyAt(await storyKeyPrefix("C1", "POLLIES return to kitchen table!"), 1_000));
+  });
+
+  it("keeps the prefix intact so the range lookup finds it", async () => {
+    const prefix = await storyKeyPrefix("C1", "Zero chance");
+    const key = storyKeyAt(prefix, 1_700_000_000_000);
+    expect(key.startsWith(`${prefix}|`)).toBe(true);
+    expect(key < `${prefix}}`).toBe(true); // inside the getFresh range scan
+    expect(key.split("|")).toHaveLength(3);
   });
 });

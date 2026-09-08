@@ -248,13 +248,35 @@ function everyMentionToMention(doc: Record<string, Json>, topBrief: string | nul
     reach: reachFromStatusLine(doc["statusLine"]),
     sentiment: sentimentFromStatusLine(doc["statusLine"]),
     publishedAt: isoDate(pick(doc, [...KEYS.publishedAt])), // no explicit date in this shape → usually null
-    snippet: str(doc["text"]),
+    snippet: tidySnippet(str(doc["text"])),
     author,
     briefName: str(doc["source"]) ?? topBrief,
     imageUrl: str(doc["image"]),
     matchedKeywords: keywords(doc["keywords"]),
     raw: doc,
   };
+}
+
+/**
+ * Repair a snippet that Meltwater cut mid-sentence and left the severed punctuation on.
+ *
+ * Their excerpts routinely begin `". The message we will send is…"` or `", Mums for Nuclear…"` —
+ * the tail of the preceding clause. Sentence-ending punctuation is simply dropped, because what
+ * follows is already a clean sentence start; clause punctuation becomes an ellipsis, because the
+ * reader IS being dropped mid-thought and should see that.
+ *
+ * Meltwater's own leading `...` is left alone — that's their deliberate truncation marker, and it
+ * accounts for the large majority of snippets that start with punctuation.
+ */
+export function tidySnippet(text: string | null): string | null {
+  if (!text) return text;
+  let s = text.trimStart();
+  if (s.startsWith("...") || s.startsWith("\u2026")) return s; // their own truncation marker
+  // Sentence enders: drop, the next sentence stands on its own.
+  if (/^[.?!]\s/.test(s)) s = s.slice(1).trimStart();
+  // Clause punctuation: we're mid-thought, so mark the elision.
+  else if (/^[,;:]\s/.test(s)) s = `\u2026${s.slice(1).trimStart()}`;
+  return s || null;
 }
 
 function toMention(doc: Record<string, Json>, topBrief: string | null): NormalizedMention {
@@ -269,7 +291,7 @@ function toMention(doc: Record<string, Json>, topBrief: string | null): Normaliz
     reach: num(pick(doc, [...KEYS.reach])),
     sentiment: str(pick(doc, [...KEYS.sentiment])),
     publishedAt: isoDate(pick(doc, [...KEYS.publishedAt])),
-    snippet: str(pick(doc, [...KEYS.snippet])),
+    snippet: tidySnippet(str(pick(doc, [...KEYS.snippet]))),
     author: str(pick(doc, [...KEYS.author])),
     briefName: str(pick(doc, [...KEYS.briefName])) ?? topBrief,
     imageUrl: str(pick(doc, [...KEYS.imageUrl])),

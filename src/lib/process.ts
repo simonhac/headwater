@@ -6,7 +6,7 @@ import { parseWebhookPayload } from "@/lib/meltwater/parse";
 import { applyFilters, resolveBrief } from "@/lib/filter/engine";
 import { buildAttachment, buildStoryAttachment, buildPostPayload, attachmentHash } from "@/lib/slack/format";
 import { postToSlack, updateSlack } from "@/lib/slack/post";
-import { StoryStore, storyKey, outletOf, addOutlet, addBriefLabel, type Outlet, type StoryRow } from "@/lib/story";
+import { StoryStore, storyKeyAt, storyKeyPrefix, outletOf, addOutlet, addBriefLabel, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 import { simhash64 } from "@/lib/simhash";
 import { buildSketch, type PhraseSketch } from "@/lib/nearmatch";
@@ -272,9 +272,12 @@ export async function processEvent(
       let key: string | null = null;
       let existing: StoryRow | null = null;
       if (!isSeen && postingEnabled) {
-        key = mention.title ? await storyKey(channel, mention.title) : null;
+        // The prefix identifies the HEADLINE (for the merge lookup); the key identifies THIS card.
+        // `now` is the event's received_at, so a replay recomputes the same key and re-merges.
+        const prefix = mention.title ? await storyKeyPrefix(channel, mention.title) : null;
+        key = prefix ? storyKeyAt(prefix, now) : null;
         // Same-title syndication first; then broadcast near-duplicate by shared phrase.
-        existing = key ? await stories.getFresh(key, now - SYNDICATION_WINDOW_MS) : null;
+        existing = prefix ? await stories.getFresh(prefix, now - SYNDICATION_WINDOW_MS) : null;
         if (!existing && (simFp !== null || sketch !== null)) {
           existing = await findNearDup(stories, mention, simFp, sketch, now, channel);
         }

@@ -298,10 +298,17 @@ curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
 
 Cleanup matches on the title marker, so it can only ever remove test cards.
 
-Fanout is **per channel all the way down**: `stories.story_key` is `"<channel>|<sha256(title)>"`, so
-the same headline routed to two channels is two independent cards that merge and coalesce separately.
-`/health` reports `channels` (a count only). Migration `0010_stories_channel_key.sql` re-keys
-pre-fanout rows in place and is idempotent.
+Fanout is **per channel all the way down**: `stories.story_key` is
+`"<channel>|<sha256(title)>|<created_at>"`, so the same headline routed to two channels is two
+independent cards that merge and coalesce separately. `/health` reports `channels` (a count only).
+Migrations `0010_stories_channel_key.sql` and `0011_stories_instance_key.sql` re-key older rows in
+place and are both idempotent.
+
+The trailing `created_at` identifies one posted card. Merging looks up the newest row matching the
+`"<channel>|<sha256(title)>"` prefix within the syndication window; anything older is left as
+history. Without it the key was eternal while the lookup was windowed, so a headline recurring after
+72h posted a fresh card, collided on INSERT, and `ON CONFLICT DO UPDATE` repointed the row at the new
+message — orphaning the old card. That was 16 of the 17 orphans swept on 2026-09-08.
 
 ## Monitoring
 Two guardrails exist because a webhook-secret mismatch (or a stalled upstream) can silence the feed
