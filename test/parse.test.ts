@@ -32,6 +32,28 @@ describe("mastheadForDomain (outlets.ts)", () => {
     expect(mastheadForDomain(null)).toBeNull();
   });
 
+  it("returns the verified masthead for the pass-one additions, verbatim", () => {
+    expect(mastheadForDomain("sbs.com.au")).toBe("SBS News"); // initialism, not "Sbs"
+    expect(mastheadForDomain("canberratimes.com.au")).toBe("The Canberra Times"); // leading "The"
+    expect(mastheadForDomain("marieclaire.com.au")).toBe("marie claire"); // lower-case brand kept
+    // Not derivable from the domain at all — guards against anyone "simplifying" these back.
+    expect(mastheadForDomain("theherald.com.au")).toBe("Newcastle Herald");
+    expect(mastheadForDomain("theleader.com.au")).toBe("St George & Sutherland Shire Leader");
+  });
+
+  it("keys the two Yahoo properties separately so neither inherits the other's name", () => {
+    // A single "yahoo.com" entry would match both (subdomains inherit) and label Finance as News.
+    expect(mastheadForDomain("au.news.yahoo.com")).toBe("Yahoo News Australia");
+    expect(mastheadForDomain("au.finance.yahoo.com")).toBe("Yahoo Finance Australia");
+    expect(mastheadForDomain("yahoo.com")).toBeNull();
+  });
+
+  it("leaves multi-masthead publishers unmapped", () => {
+    // Active Networks publishes Peninsula Living, North Shore Living and Think Local — a mapped name
+    // wins over authorName, so mapping the domain would stamp the wrong magazine on their articles.
+    expect(mastheadForDomain("activenetworks.com.au")).toBeNull();
+  });
+
   it("hostnameOf strips www. and lowercases; null on garbage", () => {
     expect(hostnameOf("https://WWW.Example.COM/path?x=1")).toBe("example.com");
     expect(hostnameOf("not a url")).toBeNull();
@@ -240,6 +262,13 @@ describe("looksLikePerson (outlets.ts)", () => {
     expect(looksLikePerson("Transparency International Australia")).toBe(false); // 'Australia'
     expect(looksLikePerson(null)).toBe(false);
   });
+
+  it("rejects parliamentary source names (aph.gov.au sends these as authorName)", () => {
+    // Three capitalised words with no outlet word, so this used to read as a byline and the card
+    // headlined the domain-derived "Aph" instead.
+    expect(looksLikePerson("Senate Official Hansard")).toBe(false);
+    expect(looksLikePerson("House of Representatives Official Hansard")).toBe(false);
+  });
 });
 
 describe("parseWebhookPayload — outlet recovery from the publisher domain (real cases)", () => {
@@ -298,6 +327,44 @@ describe("parseWebhookPayload — outlet recovery from the publisher domain (rea
     });
     expect(m!.sourceName).toBe("The Mercury");
     expect(m!.author).toBe("Jared Lynch");
+  });
+
+  it("maps a byline on a newly-listed masthead (bordermail.com.au → The Border Mail)", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 40k Reach",
+      source: "MPs",
+      authorName: "Anthony Bunn",
+      links: { source: trackingUrl("https://www.bordermail.com.au/") },
+    });
+    expect(m!.sourceName).toBe("The Border Mail");
+    expect(m!.author).toBe("Anthony Bunn");
+  });
+
+  it("is idempotent when Meltwater already sent the masthead on a mapped domain", () => {
+    // Print mentions arrive as "The Border Mail (Print version)" — cleanOutletName strips the
+    // annotation, the map yields the same string, so the byline stays empty rather than echoing it.
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 40k Reach",
+      source: "MPs",
+      authorName: "The Border Mail (Print version)",
+      links: { source: trackingUrl("https://www.bordermail.com.au/") },
+    });
+    expect(m!.sourceName).toBe("The Border Mail");
+    expect(m!.author).toBeNull();
+  });
+
+  it("keeps the Hansard name instead of deriving 'Aph' from the domain", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 1k Reach",
+      source: "MPs",
+      authorName: "Senate Official Hansard (Print version)",
+      links: { source: trackingUrl("https://www.aph.gov.au/") },
+    });
+    expect(m!.sourceName).toBe("Senate Official Hansard"); // NOT "Aph", and not flattened to a
+    expect(m!.author).toBeNull(); //                          single "Parliament of Australia"
   });
 
   it("labels a party media release from liberal.org.au", () => {

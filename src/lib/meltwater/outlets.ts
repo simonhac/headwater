@@ -56,6 +56,49 @@ const MASTHEAD_BY_DOMAIN: Record<string, string> = {
   "viewfromthewing.com": "View from the Wing",
   "wangarattachronicle.com.au": "Wangaratta Chronicle",
   "yourlifechoices.com.au": "YourLifeChoices",
+  // --- pass one of the outlet-naming fixes (2026-09-08). Without an entry here `deriveOutletName`
+  // title-cases the domain label, which produced "Sbs", "Bordermail", "Canberratimes" etc. Each name
+  // below is verified: either Meltwater itself sent it as `authorName` on that same domain (its print
+  // mentions carry the masthead, e.g. "The Border Mail (Print version)" — count in brackets), or it
+  // was read off the publisher's own page title, or both. Do NOT guess a name from the domain here. ---
+  "alpineobserver.com.au": "Alpine Observer & Myrtleford Times",
+  "areanews.com.au": "The Area News",
+  "au.finance.yahoo.com": "Yahoo Finance Australia", // keyed per-subdomain: a bare yahoo.com would
+  "au.news.yahoo.com": "Yahoo News Australia", //       label Finance as News (subdomains inherit)
+  "bordermail.com.au": "The Border Mail", // [14]
+  "cairnspost.com.au": "The Cairns Post", // [3]
+  "canberratimes.com.au": "The Canberra Times", // [2]
+  "capitalbrief.com": "Capital Brief",
+  "citynews.com.au": "Canberra CityNews", // their own masthead; Meltwater's print label inverts it
+  "croakey.org": "Croakey Health Media",
+  "dailyadvertiser.com.au": "The Daily Advertiser",
+  "examiner.com.au": "The Examiner", // [2]
+  "geelongadvertiser.com.au": "Geelong Advertiser", // [1]
+  "gympietoday.com.au": "Gympie Today", // [1]
+  "illawarramercury.com.au": "Illawarra Mercury",
+  "irrigator.com.au": "The Irrigator",
+  "kimberleyecho.com.au": "The Kimberley Echo",
+  "marieclaire.com.au": "marie claire", // [2] genuinely lower-case brand — don't "fix" it
+  "medicalrepublic.com.au": "Medical Republic", // no "The" — per the masthead on their own site
+  "msn.com": "MSN",
+  "naroomanewsonline.com.au": "Narooma News",
+  "northerndailyleader.com.au": "The Northern Daily Leader",
+  "northsidelivingnews.com.au": "Northside Living", // the site's brand; Meltwater's [1] label is stale
+  "northwesttelegraph.com.au": "North West Telegraph",
+  "ntnews.com.au": "NT News", // [4]
+  "pittwateronlinenews.com": "Pittwater Online News", // [10]
+  "postnewspapers.com.au": "POST Newspaper", // [6]
+  "sbs.com.au": "SBS News",
+  "southernhighlandnews.com.au": "Southern Highland News",
+  "spectator.com.au": "The Spectator Australia", // [1]
+  "standard.net.au": "The Standard",
+  "startupdaily.net": "Startup Daily", // [1]
+  "thechronicle.com.au": "The Chronicle", // [5]
+  "thedailyaus.com.au": "The Daily Aus",
+  "theherald.com.au": "Newcastle Herald", // [1] NOT "The Herald" — Nine's legacy Newcastle domain
+  "theleader.com.au": "St George & Sutherland Shire Leader",
+  "thesaturdaypaper.com.au": "The Saturday Paper", // [2]
+  "weeklytimesnow.com.au": "The Weekly Times", // [1]
 };
 
 // Outlet/organisation words: a byline candidate containing one is a masthead, not a person's name.
@@ -65,6 +108,10 @@ const OUTLET_WORDS = new Set([
   "australian", "australia", "conversation", "wire", "network", "media", "press", "radio", "tv",
   "television", "fm", "am", "magazine", "online", "digital", "report", "review", "today", "nation",
   "national", "indigenous", "jewish", "catholic", "party", "the", "of", "and", "for",
+  // Parliamentary sources: Meltwater's authorName for aph.gov.au is "Senate Official Hansard", which is
+  // three capitalised words and would otherwise read as a byline. Deliberately NOT "house"/"official" —
+  // both occur in real names, and a false positive there lets a person headline a card as the outlet.
+  "hansard", "senate", "parliament",
 ]);
 
 /**
