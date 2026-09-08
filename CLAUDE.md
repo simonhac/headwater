@@ -13,6 +13,24 @@
 
 ## Operational log
 
+- **2026-09-08 — Slack app finally renamed MeltStreem → Headwater.** Renaming the app (Basic
+  Information → Display Information) and the bot display name (App Home → App Display Name), then
+  reinstalling, did **not** change the name Slack shows on cards — it had been stuck since the July
+  rebrand. Slack keeps three separate name records: the app name, the **bot record** (`bots.info` →
+  `bot.name`, which the rename *does* update, and which `bot_profile.name` on a new message reflects),
+  and the **bot user profile** (`users.info` → `real_name` / `display_name`), written once when the
+  bot user is created at first install. The clients — desktop *and* web — render the third one, so
+  `bot_profile.name: "Headwater"` still displayed as "MeltStreem". A reinstall re-grants scopes and
+  re-issues tokens; it never rewrites the bot user. Fix: `users.profile.set` on the bot user
+  (`U0BFQKZJXT8`) with `display_name` + `real_name` = `Headwater`. It needs an **`xoxp-` user token**
+  from a Workspace Owner/Admin with `users.profile:write` (a bot token gets `not_allowed_token_type`);
+  grant it as a *User* Token Scope, reinstall, run the one call, then remove the scope and reinstall
+  to revoke — that token can edit any member profile at or below your role, so never store it.
+  Historical cards relabel retroactively (they render from the live profile). The deprecated `name`
+  handle stays `meltstreem` and has no API to change it, but `@`-autocomplete matches `display_name`,
+  so `@Headwater` resolves. `chat:write.customize` is *not* the answer — it only overrides the name in
+  the message header, never the handle, and Slack's own changelog advises apps not to set `username`.
+
 - **2026-07-10 — Meltwater webhook re-pointed to the custom domain.** The feed had been
   silent ~26h. Root cause: during config hardening the Worker was moved from its
   `<worker>.workers.dev` URL to the the custom domain custom domain **and the
