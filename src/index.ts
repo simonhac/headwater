@@ -8,12 +8,18 @@ import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
 import { coalesceDuplicateStories } from "@/lib/coalesce";
 import { sweepOrphans } from "@/lib/orphans";
+import { repairSnippets } from "@/lib/snippets";
+import { cleanupTestPosts, sendTestPosts } from "@/lib/testpost";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
 import { pokeStationRender, getRenderState } from "@/do/client";
 import { backfillStations } from "@/lib/backfill";
 import { listStationResolutions } from "@/lib/meltwater/stations";
 import { renderStationsPage } from "@/ui/stations";
 import { accessOk, checkBearer } from "@/lib/auth";
+import { configuredChannels, emptyRouting, loadRouting, parseRoutingForm, saveRouting } from "@/lib/routing";
+import { listBotChannels } from "@/lib/slack/channels";
+import { renderRoutingPage } from "@/ui/routing";
+import { feedConfig } from "@/config/feed.config";
 import { withRetry } from "@/lib/retry";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
@@ -96,11 +102,13 @@ app.get("/health", async (c) => {
   } catch {
     /* DB not migrated yet */
   }
-  // Format-validate the runtime env (never leaks values). Only the `configOk` boolean is public.
-  const config = summarizeConfig(validateConfig(c.env));
+  // Format-validate the runtime env + saved routing (never leaks values, and channel ids are
+  // treated as secret). Only the `configOk` boolean is public.
+  const routing = await loadRouting(c.env.DB).catch(() => emptyRouting());
+  const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-14", // bump on each deploy to confirm the running code
+    build: "headwater-25", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
@@ -111,6 +119,8 @@ app.get("/health", async (c) => {
       slackChannel: !!c.env.SLACK_DEFAULT_CHANNEL,
       accessConfigured: !!c.env.ACCESS_TEAM_DOMAIN && !!c.env.ACCESS_AUD,
     },
+    // How many distinct channels the feed fans out to (count only — ids are secret). 1 = default only.
+    channels: configuredChannels(routing, c.env).length,
   });
 });
 
@@ -248,6 +258,54 @@ app.post("/admin/coalesce", async (c) => {
   }
 });
 
+// --- admin: repair snippets Meltwater truncated mid-sentence (leading ". " / ", ") in stories
+// ALREADY stored, rewriting both the primary snapshot and each outlet's copy, and chat.updating any
+// card whose rendering changes. Unlike /admin/redecode this touches outlets_json (where a
+// high-reach outlet's own snippet leads the card) and persists data-only fixes. Gated by
+// REPLAY_KEY; `dryRun=1` previews; `hours=N` sets the window (default 720); capped at 40 updates
+// per call (re-run until `remaining` is 0). ---
+app.post("/admin/repair-snippets", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const dryRun = c.req.query("dryRun") === "1";
+  if (!dryRun && c.env.POSTING_ENABLED !== "true") {
+    return c.text("POSTING_ENABLED is not true (use dryRun=1 to preview)", 409);
+  }
+  const hours = Number(c.req.query("hours") ?? 720);
+  try {
+    return c.json(await repairSnippets(c.env, { hours: Number.isFinite(hours) ? hours : 720, dryRun, now: Date.now() }));
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
+// --- admin: post one synthetic card per brief, to wherever /inspect/routing sends that brief.
+// Verifies routing without waiting for a Meltwater delivery (and for briefs whose search is quiet,
+// it's the ONLY way to check). Gated by REPLAY_KEY. Defaults to a DRY RUN — pass `post=1` to
+// actually post. `brief=<id>` limits it to one brief. Test cards are not stored, so they never
+// merge with a real story; delete them from Slack when you're done. ---
+app.post("/admin/test-post", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  // Opt IN to posting: the harmless spelling is the one you get by accident.
+  const dryRun = c.req.query("post") !== "1";
+  if (!dryRun && c.env.POSTING_ENABLED !== "true") {
+    return c.text("POSTING_ENABLED is not true", 409);
+  }
+  try {
+    // `cleanup=1` removes test cards instead of posting them. Matched on the title marker, so it
+    // can only ever delete test cards — `/admin/orphans` would take real ones with them.
+    if (c.req.query("cleanup") === "1") {
+      return c.json(await cleanupTestPosts(c.env, { dryRun, tag: c.req.query("tag") ?? undefined }));
+    }
+    return c.json(await sendTestPosts(c.env, { dryRun, briefId: c.req.query("brief") ?? undefined }));
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
 // --- admin: delete orphan cards — the bot's own attachment-bearing messages whose ts has no backing
 // `stories` row (left when a story row was removed but its Slack message wasn't). Heartbeat/text posts
 // are never touched. Gated by REPLAY_KEY; `dryRun=1` previews; capped at 40 deletes/call (re-run until
@@ -334,6 +392,47 @@ app.get("/icons/media/v1/:name", (c) => {
     status: 200,
     headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=31536000, immutable" },
   });
+});
+
+// --- brief → channel routing (gated by Cloudflare Access). Under /inspect/* so it's covered by the
+// existing Access destination — no new Zero Trust config needed (see the /stations note above). ---
+/** Turn a `conversations.list` failure into something actionable on the page. */
+function channelListError(error: string): string {
+  if (error === "missing_scope")
+    return "Slack is missing the channels:read + groups:read scopes — add them under OAuth & Permissions, then Reinstall to workspace.";
+  if (error === "no_slack_token") return "SLACK_BOT_TOKEN is not configured.";
+  return `Slack error listing channels: ${error}`;
+}
+
+app.get("/inspect/routing", async (c) => {
+  if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
+  const [routing, list] = await Promise.all([loadRouting(c.env.DB), listBotChannels(c.env)]);
+  return c.html(
+    renderRoutingPage({
+      briefs: feedConfig.briefs,
+      channels: list.channels,
+      routing,
+      defaultChannel: c.env.SLACK_DEFAULT_CHANNEL ?? "",
+      flash: c.req.query("saved") ? "Routing saved." : undefined,
+      error: list.error ? channelListError(list.error) : undefined,
+      diagnostic: `slack: ${list.scanned} conversations over ${list.pages} page(s), ${list.channels.length} with the bot as a member${list.truncated ? " (TRUNCATED — more pages remain)" : ""}`,
+    }),
+  );
+});
+
+app.post("/inspect/routing", async (c) => {
+  if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
+  // CSRF: Access authenticates the session cookie, which a cross-site form POST would also carry.
+  // `Sec-Fetch-Site` is set by every browser that can reach this page; absent = a non-browser client.
+  const site = c.req.header("sec-fetch-site");
+  if (site && site !== "same-origin") return c.text("forbidden", 403);
+
+  const list = await listBotChannels(c.env);
+  if (list.error) return c.text(`slack error: ${list.error}`, 502);
+  const briefIds = [...feedConfig.briefs.map((b) => b.id), "default"];
+  const body = (await c.req.parseBody({ all: true })) as Record<string, unknown>;
+  await saveRouting(c.env.DB, parseRoutingForm(body, briefIds, list.channels.map((ch) => ch.id)), Date.now());
+  return c.redirect("/inspect/routing?saved=1", 303);
 });
 
 app.get("/inspect", async (c) => {

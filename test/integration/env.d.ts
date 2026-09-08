@@ -8,5 +8,7 @@ declare module "cloudflare:test" {
     POSTING_ENABLED: string;
     SLACK_BOT_TOKEN: string;
     SLACK_DEFAULT_CHANNEL: string;
+    /** Not bound by default — routing tests pass it per-request to toggle the Access gate. */
+    DEV_SKIP_ACCESS?: string;
   }
 }

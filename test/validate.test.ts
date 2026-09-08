@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Env } from "@/env";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
+import type { Routing } from "@/lib/routing";
 
 // A fully valid env with DUMMY values (never real secrets). validateConfig only reads string
 // fields, so DB can be a stub.
@@ -60,10 +61,64 @@ describe("validateConfig", () => {
     expect(summarizeConfig(validateConfig(env)).ok).toBe(true);
   });
 
+  it("accepts a well-formed routing and flags a malformed channel id", () => {
+    const good: Routing = { v: 1, briefs: { mps: ["C0TEST000AA", "#vic-2026"] }, updatedAt: 1 };
+    expect(summarizeConfig(validateConfig(mkEnv(), good)).ok).toBe(true);
+    const bad: Routing = { v: 1, briefs: { mps: ["general"] }, updatedAt: 1 };
+    const i = summarizeConfig(validateConfig(mkEnv(), bad)).issues.find((x) => x.name === "routing");
+    expect(i?.severity).toBe("error");
+    expect(i?.detail).toContain("mps");
+  });
+
+  it("warns (without failing configOk) on a routed brief that no longer exists", () => {
+    const stale: Routing = { v: 1, briefs: { "ghost-brief": ["C0TEST000AA"] }, updatedAt: 1 };
+    const sum = summarizeConfig(validateConfig(mkEnv(), stale));
+    expect(sum.ok).toBe(true);
+    expect(sum.issues.find((x) => x.name === "routing.briefs")?.severity).toBe("warn");
+  });
+
+  it("routes the synthesized 'default' brief without warning", () => {
+    const r: Routing = { v: 1, briefs: { default: ["C0TEST000AA"] }, updatedAt: 1 };
+    expect(summarizeConfig(validateConfig(mkEnv(), r)).issues).toHaveLength(0);
+  });
+
+  it("never echoes a channel id from the routing (they are treated as secret)", () => {
+    const r: Routing = { v: 1, briefs: { mps: ["not-a-channel-id"] }, updatedAt: 1 };
+    const serialized = JSON.stringify(summarizeConfig(validateConfig(mkEnv(), r)));
+    expect(serialized).not.toContain("not-a-channel-id");
+  });
+
   it("never leaks a secret value in the summary", () => {
     const secret = GOOD.WEBHOOK_SHARED_SECRET!;
     const env = mkEnv({ WEBHOOK_SHARED_SECRET: `https://x/${secret}` }); // malformed but contains the secret
     const serialized = JSON.stringify(summarizeConfig(validateConfig(env)));
     expect(serialized).not.toContain(secret);
+  });
+});
+
+describe("validateConfig — muted briefs", () => {
+  const base = { WEBHOOK_SHARED_SECRET: "x".repeat(20), REPLAY_KEY: "y".repeat(20), SLACK_BOT_TOKEN: `xoxb-${"z".repeat(24)}`, SLACK_DEFAULT_CHANNEL: "C0123ABCD", POSTING_ENABLED: "true" } as unknown as Env;
+
+  it("warns (never errors) when a brief is routed to no channel at all", () => {
+    // Muting is legitimate, but its symptom is a silent channel — indistinguishable from a dead
+    // feed — so it must be visible on /health rather than discovered by absence.
+    const checks = validateConfig(base, { v: 1, briefs: { mps: [], teals: ["C0123ABCD"] }, updatedAt: 1 });
+    const muted = checks.find((c) => c.name === "routing.muted");
+    expect(muted).toMatchObject({ ok: false, severity: "warn" });
+    expect(muted?.detail).toContain("mps");
+    expect(muted?.detail).not.toContain("teals");
+    expect(summarizeConfig(checks).ok).toBe(true); // a warn must not fail configOk
+  });
+
+  it("says nothing when no brief is muted", () => {
+    const checks = validateConfig(base, { v: 1, briefs: { mps: ["C0123ABCD"] }, updatedAt: 1 });
+    expect(checks.find((c) => c.name === "routing.muted")).toBeUndefined();
+  });
+
+  it("never echoes a routed channel id into the detail", () => {
+    // Distinct from the SLACK_DEFAULT_CHANNEL check's static "e.g. C0123ABCD" help text, so this
+    // asserts a real leak rather than colliding with an example string.
+    const checks = validateConfig(base, { v: 1, briefs: { mps: [], teals: ["C9SECRET1"] }, updatedAt: 1 });
+    for (const c of checks) expect(c.detail ?? "").not.toContain("C9SECRET1");
   });
 });

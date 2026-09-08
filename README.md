@@ -29,7 +29,9 @@ Auth model (all fail-closed except the two public routes) — see [Access & secu
 | `GET /api/webhooks/recent` | **Cloudflare Access** | recent events as JSON |
 | `POST /admin/redecode` | `Authorization: Bearer REPLAY_KEY` | re-render recent cards under the current decoding and `chat.update` the changed ones in place (non-destructive). `dryRun=1` previews; `hours=N` sets the window (default 168); capped at 40 updates/call (re-run until `remaining` is 0) |
 | `POST /admin/coalesce` | `Authorization: Bearer REPLAY_KEY` | coalesce broadcast duplicates that posted as separate messages **in place** — edit the oldest, delete the rest (non-destructive to the survivor). `dryRun=1` previews; `hours=N`/`all=1` set the window; capped at 40 Slack calls/call (re-run until `remaining` is 0). See [Deduplication](#deduplication) |
+| `POST /admin/repair-snippets` | `Authorization: Bearer REPLAY_KEY` | rewrite snippets Meltwater cut mid-sentence (leading `". "` → dropped, `", "` → `…`) in stories already stored, in **both** `primary_mention_json` and each outlet's copy, and `chat.update` any card whose rendering changes. Unlike `/admin/redecode` this fixes outlet-led cards and persists data-only repairs, and it never bumps `updated_at`. `dryRun=1` previews; `hours=N` (default 720); capped at 40 updates/call |
 | `POST /admin/replay` | `Authorization: Bearer REPLAY_KEY` | reparse + **repost** archived events (destructive — clears + reposts; prefer `/admin/redecode`) |
+| `POST /admin/test-post` | `Authorization: Bearer REPLAY_KEY` | post one synthetic card per brief to wherever `/inspect/routing` sends it, to verify routing without waiting for a Meltwater delivery. **Dry run by default** — `post=1` actually posts; `brief=<id>` limits it to one. Test cards are never stored, so they never merge with a real story. `cleanup=1` deletes them again (matched on the title marker, so it can only ever remove test cards) |
 | `GET /admin/render-station?url=…` | `Authorization: Bearer REPLAY_KEY` | render a Meltwater viewer URL via Browser Rendering and return its station name (debug/verify) |
 | `GET /admin/heartbeat` | `Authorization: Bearer REPLAY_KEY` | run the ingestion-stall check on demand |
 
@@ -77,7 +79,7 @@ Edit `src/config/feed.config.ts`. Start lenient, watch `/inspect` on real traffi
 - `minSourceReach` — drop small outlets ("major sources only")
 - `includeMediaTypes` / `excludeMediaTypes` — kill radio/social/blog noise (set once you see the real values in `/inspect`)
 - `sourceAllowlist` / `sourceBlocklist`, `allowedCountryCodes`
-- `briefs[]` — each brief's `label` (the "Organisation Brief"), `keywords` (highlighted + counted), and optional `matchNames`/`channel`
+- `briefs[]` — each brief's `label` (the "Organisation Brief"), `keywords` (highlighted + counted), and optional `matchNames`. Which Slack channel(s) a brief posts to is **not** in this file — it's edited at `/inspect/routing` (see below)
 - `nearDuplicate` — broadcast shared-phrase merge thresholds (SimHash Hamming, phrase overlap, verbatim-run length, air-time gap, media types); see [Deduplication](#deduplication)
 
 > The Generic Webhook payload schema isn't publicly documented, so `src/lib/meltwater/parse.ts`
@@ -244,10 +246,70 @@ known-correct URL).
 > naming never blocks delivery — it only affects labeling.
 
 ## Wire up Slack
-1. Create a Slack app → add bot scope `chat:write` (optionally `chat:write.public`) → install → copy the `xoxb-…` token.
-2. Create the channel and `/invite` the bot.
+1. Create a Slack app → add bot scopes `chat:write` (optionally `chat:write.public`) plus
+   `channels:read` and `groups:read` (the channel picker on `/inspect/routing` calls
+   `conversations.list` over public + private channels) → install → copy the `xoxb-…` token.
+2. Create the channel and `/invite` the bot. The picker only offers channels the bot is a member of.
 3. `wrangler secret put SLACK_BOT_TOKEN` and `SLACK_DEFAULT_CHANNEL` (the channel id, e.g. `C0123ABCD`).
 4. Set `"POSTING_ENABLED": "true"` in `wrangler.jsonc` and `pnpm run deploy`.
+
+> Adding `channels:read`/`groups:read` to an already-installed app needs **Reinstall to workspace**
+> (OAuth & Permissions). Until then `/inspect/routing` shows a `missing_scope` notice instead of the
+> channel columns; posting is unaffected.
+
+### Routing briefs to channels — `/inspect/routing`
+Each brief fans out to one or more Slack channels. The matrix (rows = briefs, columns = the channels
+the bot is in) is stored in D1 (`ops_state.routing`), so changing it needs **no redeploy** and no
+channel id ever enters this repo.
+
+A tick means "this channel receives this brief" — that is the whole rule. Two states look similar and
+are not: a brief that has **never been routed** posts to `SLACK_DEFAULT_CHANNEL` (its default-column
+tick renders greyed, and saving makes it explicit), whereas a brief saved with **every box unticked**
+is *muted* and posts nowhere. So a never-saved matrix reproduces the old single-channel behaviour
+exactly, while unticking a row is a deliberate off switch. Muted mentions are still recorded as
+`dropped` in `/inspect` (reason `muted: no channel routed for this brief`) and `/health` raises a
+`routing.muted` warning, so a muted brief can't be mistaken for a dead feed.
+
+To check routing without waiting for a delivery — and for a brief whose Meltwater search is quiet or
+not yet bound, this is the only way to check at all:
+
+```bash
+# Dry run (default): report where each brief WOULD go, post nothing.
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" https://feed.moofer.com/admin/test-post | jq
+
+# Actually post, one brief only.
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
+  "https://feed.moofer.com/admin/test-post?post=1&brief=vic-state" | jq
+```
+
+Test cards carry no `stories`/`seen_mentions` row, so they never merge with a real article and the
+call is repeatable. That also makes them orphans by construction — so clean them up with
+`?cleanup=1`, **not** `/admin/orphans`, which deletes every card lacking a story row and would take
+real ones with them:
+
+```bash
+# Dry run: list the test cards that would be deleted.
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
+  "https://feed.moofer.com/admin/test-post?cleanup=1" | jq
+
+# Delete them (add &tag=<tag from the post response> to clear just one run).
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
+  "https://feed.moofer.com/admin/test-post?cleanup=1&post=1" | jq
+```
+
+Cleanup matches on the title marker, so it can only ever remove test cards.
+
+Fanout is **per channel all the way down**: `stories.story_key` is
+`"<channel>|<sha256(title)>|<created_at>"`, so the same headline routed to two channels is two
+independent cards that merge and coalesce separately. `/health` reports `channels` (a count only).
+Migrations `0010_stories_channel_key.sql` and `0011_stories_instance_key.sql` re-key older rows in
+place and are both idempotent.
+
+The trailing `created_at` identifies one posted card. Merging looks up the newest row matching the
+`"<channel>|<sha256(title)>"` prefix within the syndication window; anything older is left as
+history. Without it the key was eternal while the lookup was windowed, so a headline recurring after
+72h posted a fresh card, collided on INSERT, and `ON CONFLICT DO UPDATE` repointed the row at the new
+message — orphaning the old card. That was 16 of the 17 orphans swept on 2026-09-08.
 
 ## Monitoring
 Two guardrails exist because a webhook-secret mismatch (or a stalled upstream) can silence the feed

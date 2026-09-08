@@ -1,4 +1,6 @@
+import { feedConfig } from "@/config/feed.config";
 import type { Env } from "@/env";
+import type { Routing } from "@/lib/routing";
 
 /** A single config check. `detail` is safe to surface publicly — it NEVER contains a secret value. */
 export interface ConfigCheck {
@@ -11,6 +13,9 @@ export interface ConfigCheck {
   /** Human-readable reason when not ok (no secret values). */
   detail?: string;
 }
+
+/** A Slack channel: an id (C/G/D…) or a #name. A bare name without '#' won't resolve. */
+export const CHANNEL_RE = /^([CGD][A-Z0-9]{6,}|#[\w-]+)$/;
 
 /** URL scheme, whitespace, or slashes in a value that is supposed to be a bare path/query token. */
 const TOKEN_CONTAMINATION = /:\/\/|\s|\//;
@@ -36,7 +41,7 @@ function tokenCheck(name: string, val: string | undefined, min = 16): ConfigChec
  * that failure mode is covered by the ingestion heartbeat, not here. Returns names + reasons only,
  * never secret values, so the result is safe to expose.
  */
-export function validateConfig(env: Env): ConfigCheck[] {
+export function validateConfig(env: Env, routing?: Routing): ConfigCheck[] {
   const checks: ConfigCheck[] = [
     tokenCheck("WEBHOOK_SHARED_SECRET", env.WEBHOOK_SHARED_SECRET),
     tokenCheck("REPLAY_KEY", env.REPLAY_KEY),
@@ -55,7 +60,7 @@ export function validateConfig(env: Env): ConfigCheck[] {
   const ch = env.SLACK_DEFAULT_CHANNEL;
   checks.push({
     name: "SLACK_DEFAULT_CHANNEL",
-    ok: !!ch && /^([CGD][A-Z0-9]{6,}|#[\w-]+)$/.test(ch),
+    ok: !!ch && CHANNEL_RE.test(ch),
     severity: "error",
     detail: ch ? "expected a channel id (e.g. C0123ABCD) or #channel-name" : "missing",
   });
@@ -68,6 +73,41 @@ export function validateConfig(env: Env): ConfigCheck[] {
     severity: "warn",
     detail: pe === "true" || pe === "false" ? undefined : `is ${JSON.stringify(pe)}; only the exact string "true" enables posting`,
   });
+
+  // Brief→channel routing (ops_state `routing`, edited at /inspect/routing). Details name brief ids
+  // and counts only — never a channel id, which is treated as a secret like SLACK_DEFAULT_CHANNEL.
+  if (routing) {
+    const known = new Set<string>([...feedConfig.briefs.map((b) => b.id), "default"]);
+    const entries = Object.entries(routing.briefs);
+    const badChannels = entries.filter(([, chans]) => chans.some((c) => !CHANNEL_RE.test(c))).map(([id]) => id);
+    const staleBriefs = entries.filter(([id]) => !known.has(id)).map(([id]) => id);
+    checks.push({
+      name: "routing",
+      ok: badChannels.length === 0,
+      severity: "error",
+      detail: badChannels.length ? `malformed channel id for brief(s): ${badChannels.join(", ")}` : undefined,
+    });
+    // A muted brief posts nowhere. That's a legitimate setting, but it's also the one state you can
+    // reach with a stray click, and its symptom (a quiet channel) looks exactly like a dead feed —
+    // so surface it on /health rather than leaving it to be discovered.
+    const mutedBriefs = entries.filter(([, chans]) => chans.length === 0).map(([id]) => id);
+    if (mutedBriefs.length) {
+      checks.push({
+        name: "routing.muted",
+        ok: false,
+        severity: "warn",
+        detail: `brief(s) routed to no channel, so they post nowhere: ${mutedBriefs.join(", ")}`,
+      });
+    }
+    if (staleBriefs.length) {
+      checks.push({
+        name: "routing.briefs",
+        ok: false,
+        severity: "warn",
+        detail: `routed brief id(s) no longer in feed.config.ts: ${staleBriefs.join(", ")}`,
+      });
+    }
+  }
 
   return checks;
 }

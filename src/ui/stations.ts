@@ -109,7 +109,7 @@ export function renderStationsPage(rows: StationResolution[], state: RenderState
 <style>${CSS}</style></head><body>
 <header class="topbar">
   <h1>Headwater — broadcast station resolution</h1>
-  <nav><span class="stat">${rows.length} codes · ${resolved} resolved · ${pending} pending</span> · <a href="/inspect/stations">↻ refresh</a> · <a href="/inspect">‹ inspect</a></nav>
+  <nav><span class="stat">${rows.length} codes · ${resolved} resolved · ${pending} pending</span> · <a href="/inspect/stations">↻ refresh</a> · <a href="/inspect/routing">routing</a> · <a href="/inspect">‹ inspect</a></nav>
 </header>
 ${state ? renderStatus(state) : ""}
 <main>

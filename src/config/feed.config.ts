@@ -22,8 +22,6 @@ export interface BriefRule {
   keywords: string[];
   /** If true, drop mentions of this brief that contain none of `keywords`. */
   requireKeyword?: boolean;
-  /** Optional Slack channel override for this brief. */
-  channel?: string;
   /** Hex colour for the message's left bar, so each Organisation Brief is visually distinct. */
   color?: string;
 }
@@ -133,6 +131,16 @@ export const feedConfig: FeedConfig = {
       matchNames: ["climate 200"],
       keywords: ["Climate 200"],
       color: "#f76707", // orange
+    },
+    // Listed BEFORE "vic-state": resolveBrief takes the FIRST matchNames hit, and a search named
+    // e.g. "Vic State Election 2026" would otherwise be captured by the "vic state" rule.
+    // TODO: confirm the exact saved-search name from /inspect once the alert is bound to the webhook.
+    {
+      id: "vic-election-2026",
+      label: "Vic Election 2026",
+      matchNames: ["vic election"],
+      keywords: [],
+      color: "#e03131", // red
     },
     {
       id: "vic-state",

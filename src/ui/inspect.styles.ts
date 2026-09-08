@@ -209,12 +209,14 @@ body {
   gap: 6px;
 }
 .att-footer .sr-context-item { flex: 1 1 0; min-width: 0; }
-/* Height = the footer line-height so the glyph centres on the FIRST line (contain keeps it 14px wide,
- * centred vertically). Deliberately independent of the PNG's internal lift — the lift is a Slack-only
- * nudge (Slack centres footer_icon in a fixed 16px slot); here we have real CSS control. */
+/* SQUARE box: the glyph PNG is square, so a 14x18 box stretches it into an ellipse in any renderer
+ * that doesn't honour object-fit. Centre it on the FIRST line (18px footer line-height) with the
+ * margin instead of by growing the box. Deliberately independent of the PNG's internal lift — the
+ * lift is a Slack-only nudge (Slack centres footer_icon in a fixed 16px slot). */
 .att-footer-icon {
   width: 14px;
-  height: 18px;
+  height: 14px;
+  margin-top: 2px;
   object-fit: contain;
   flex: 0 0 auto;
 }

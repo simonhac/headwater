@@ -1,10 +1,22 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { sweepOrphans } from "@/lib/orphans";
 import type { Env } from "@/env";
+import type { Routing } from "@/lib/routing";
 
-// D1 stub: sweepOrphans only runs `SELECT slack_ts FROM stories`.all() (no bind).
-function fakeDB(ts: string[]) {
-  return { prepare: () => ({ all: async () => ({ results: ts.map((t) => ({ slack_ts: t })) }) }) };
+/** D1 stub: sweepOrphans runs `SELECT channel, slack_ts FROM stories`.all() plus loadRouting's
+ * `SELECT value FROM ops_state WHERE key = ?`.first(). */
+function fakeDB(stories: { channel: string; slack_ts: string }[], routing?: Partial<Routing>) {
+  return {
+    prepare: (sql: string) => ({
+      all: async () => ({ results: stories }),
+      bind: () => ({
+        first: async () =>
+          sql.includes("ops_state") && routing
+            ? { value: JSON.stringify({ v: 1, briefs: {}, updatedAt: 0, ...routing }) }
+            : null,
+      }),
+    }),
+  };
 }
 const resp = (body: unknown) => ({ status: 200, json: async () => body });
 const history = (messages: unknown[]) => resp({ ok: true, messages, response_metadata: { next_cursor: "" } });
@@ -28,9 +40,14 @@ describe("sweepOrphans", () => {
         return resp({ ok: true });
       }),
     );
-    const env = { DB: fakeDB(["1"]), SLACK_BOT_TOKEN: "xoxb", SLACK_DEFAULT_CHANNEL: "C1" } as unknown as Env;
+    const env = {
+      DB: fakeDB([{ channel: "C1", slack_ts: "1" }]),
+      SLACK_BOT_TOKEN: "xoxb",
+      SLACK_DEFAULT_CHANNEL: "C1",
+    } as unknown as Env;
 
     const res = await sweepOrphans(env, { dryRun: false });
+    expect(res.channels).toEqual(["C1"]);
     expect(res.scanned).toBe(2); // 2 bot cards
     expect(res.orphans).toBe(1); // ts "2"
     expect(res.deleted).toBe(1);
@@ -49,5 +66,37 @@ describe("sweepOrphans", () => {
     expect(res.orphans).toBe(1);
     expect(res.deleted).toBe(0);
     expect(res.samples[0]!.label).toContain("TV");
+  });
+
+  it("scans every routed channel, and the allow-list is channel-qualified", async () => {
+    // Both channels carry a card at ts "1". Only C1 has a story for it, so C2's is an orphan —
+    // a bare-ts allow-list would have spared it.
+    const card = { ts: "1", bot_id: "B", attachments: [{ author_name: "ABC" }] };
+    const scanned: string[] = [];
+    const deletes: { channel: string; ts: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("conversations.history")) {
+          scanned.push(new URL(u).searchParams.get("channel")!);
+          return history([card]);
+        }
+        deletes.push(JSON.parse(String(init!.body)));
+        return resp({ ok: true });
+      }),
+    );
+    const env = {
+      DB: fakeDB([{ channel: "C1", slack_ts: "1" }], { briefs: { "vic-election-2026": ["C1", "C2"] } }),
+      SLACK_BOT_TOKEN: "xoxb",
+      SLACK_DEFAULT_CHANNEL: "C1",
+    } as unknown as Env;
+
+    const res = await sweepOrphans(env, { dryRun: false });
+    expect(res.channels).toEqual(["C1", "C2"]);
+    expect(scanned).toEqual(["C1", "C2"]);
+    expect(res.scanned).toBe(2); // one card per channel
+    expect(res.orphans).toBe(1);
+    expect(deletes).toEqual([{ channel: "C2", ts: "1" }]);
   });
 });
