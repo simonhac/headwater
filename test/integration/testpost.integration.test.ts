@@ -119,3 +119,69 @@ describe("POST /admin/test-post", () => {
     expect(posts).toEqual([]);
   });
 });
+
+describe("POST /admin/test-post?cleanup=1", () => {
+  /** As Slack returns it: the posted 🧪 comes back as a `:test_tube:` shortcode. */
+  const historyTitle = (label: string, tag: string) => `:test_tube: Headwater routing test — ${label} — ${tag}`;
+
+  let deleted: { channel: string; ts: string }[];
+
+  function stubHistory(messages: unknown[]) {
+    deleted = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("conversations.history")) return Response.json({ ok: true, messages });
+        if (u.includes("chat.delete")) {
+          const b = JSON.parse(String(init?.body ?? "{}")) as { channel: string; ts: string };
+          deleted.push(b);
+          return Response.json({ ok: true });
+        }
+        return Response.json({ ok: true, ts: "1.1" });
+      }),
+    );
+  }
+
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM ops_state").run();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("matches the shortcode Slack returns, not the emoji we posted", async () => {
+    // The whole cleanup hinges on this: a marker containing 🧪 matches on the way out and never on
+    // the way back in, so cleanup would silently find nothing.
+    stubHistory([{ ts: "1.1", bot_id: "B1", attachments: [{ title: historyTitle("MPs", "T1") }] }]);
+    const body = (await (await call("?cleanup=1&post=1")).json()) as { matched: number; deleted: number };
+    expect(body.matched).toBe(1);
+    expect(body.deleted).toBe(1);
+    expect(deleted).toEqual([{ channel: DEFAULT_CH, ts: "1.1" }]);
+  });
+
+  it("never deletes a real card, however orphaned", async () => {
+    stubHistory([
+      { ts: "1.1", bot_id: "B1", attachments: [{ title: historyTitle("MPs", "T1") }] },
+      { ts: "2.2", bot_id: "B1", attachments: [{ title: "The Age: Pollies return to kitchen table" }] },
+      { ts: "3.3", user: "U1", text: "a human message" },
+    ]);
+    await call("?cleanup=1&post=1");
+    expect(deleted.map((d) => d.ts)).toEqual(["1.1"]);
+  });
+
+  it("narrows to a single run with tag=", async () => {
+    stubHistory([
+      { ts: "1.1", bot_id: "B1", attachments: [{ title: historyTitle("MPs", "2026-01-01T00:00:00Z") }] },
+      { ts: "2.2", bot_id: "B1", attachments: [{ title: historyTitle("Teals", "2026-02-02T00:00:00Z") }] },
+    ]);
+    await call("?cleanup=1&post=1&tag=2026-02-02T00:00:00Z");
+    expect(deleted.map((d) => d.ts)).toEqual(["2.2"]);
+  });
+
+  it("dry runs by default — reports matches, deletes nothing", async () => {
+    stubHistory([{ ts: "1.1", bot_id: "B1", attachments: [{ title: historyTitle("MPs", "T1") }] }]);
+    const body = (await (await call("?cleanup=1")).json()) as { matched: number; deleted: number };
+    expect(body.matched).toBe(1);
+    expect(body.deleted).toBe(0);
+    expect(deleted).toEqual([]);
+  });
+});

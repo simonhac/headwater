@@ -8,16 +8,17 @@
  * Deliberately does NOT touch `stories` or `seen_mentions`. A test card must not become a story row
  * — a later real article sharing its title would fold into the test card, and a seen row would make
  * a repeat test silently no-op. The cost is that test cards are invisible to the orphan sweep's
- * allow-list, so they read as orphans; delete them from Slack yourself, or leave them and pass
- * `dryRun` next time. See the caller in `src/index.ts` (`POST /admin/test-post`).
+ * allow-list, so they read as orphans — clean them up with `cleanupTestPosts` (`?cleanup=1`), NOT
+ * with `/admin/orphans`, which would delete real cards alongside them. See the caller in
+ * `src/index.ts` (`POST /admin/test-post`).
  */
 import type { Env } from "@/env";
 import type { BriefRule } from "@/config/feed.config";
 import { feedConfig } from "@/config/feed.config";
 import type { NormalizedMention } from "@/lib/meltwater/types";
-import { channelsFor, loadRouting, type Routing } from "@/lib/routing";
+import { channelsFor, configuredChannels, loadRouting, type Routing } from "@/lib/routing";
 import { buildPostPayload } from "@/lib/slack/format";
-import { postToSlack } from "@/lib/slack/post";
+import { deleteSlack, postToSlack } from "@/lib/slack/post";
 
 export interface TestPostTarget {
   brief: string;
@@ -38,6 +39,16 @@ export interface TestPostResult {
   targets: TestPostTarget[];
 }
 
+/**
+ * Marker every test card's title carries; cleanup deletes ONLY messages containing it, so the sweep
+ * can never touch a real card the way a blanket delete-by-timestamp tool could.
+ *
+ * Deliberately emoji-free: `conversations.history` returns titles with emoji normalised back to
+ * shortcodes (the 🧪 we post reads as `:test_tube:` on the way out), so a marker containing the
+ * character would match on post and never on read.
+ */
+export const TEST_MARKER = "Headwater routing test";
+
 /** The synthesized brief `resolveBrief` returns for unmatched mentions; routable as `default`. */
 const UNMATCHED: BriefRule = { id: "default", label: feedConfig.defaultBriefLabel, keywords: [] };
 
@@ -46,7 +57,7 @@ function testMention(brief: BriefRule, tag: string, now: number): NormalizedMent
   return {
     url: null, // no link: a fake URL would render a broken favicon and invite a click
     outletUrl: null,
-    title: `🧪 Headwater routing test — ${brief.label} — ${tag}`,
+    title: `🧪 ${TEST_MARKER} — ${brief.label} — ${tag}`,
     sourceName: "Headwater",
     mediaType: "online_news",
     countryCode: "AU",
@@ -101,4 +112,91 @@ export async function sendTestPosts(
   }
 
   return { dryRun: opts.dryRun, tag, targets };
+}
+
+export interface TestCleanupResult {
+  dryRun: boolean;
+  /** Restricted to this tag when given; otherwise every test card found. */
+  tag?: string;
+  channels: string[];
+  scanned: number;
+  matched: number;
+  deleted: number;
+  failed: number;
+  note?: string;
+  samples: { channel: string; ts: string; title: string }[];
+}
+
+interface HistoryMessage {
+  ts?: string;
+  bot_id?: string;
+  app_id?: string;
+  subtype?: string;
+  attachments?: { title?: string }[];
+}
+
+/**
+ * Delete the cards `sendTestPosts` created. Matches on the title marker rather than on timestamps,
+ * so it can only ever remove test cards — unlike `sweepOrphans`, which deletes every card without a
+ * backing story row and would take real ones with it (test cards are orphans by design, since they
+ * deliberately write no story row).
+ *
+ * `tag` narrows it to a single run; omit to clear every test card in the configured channels.
+ */
+export async function cleanupTestPosts(
+  env: Env,
+  opts: { dryRun: boolean; tag?: string },
+): Promise<TestCleanupResult> {
+  const routing = await loadRouting(env.DB);
+  const channels = configuredChannels(routing, env);
+  const res: TestCleanupResult = {
+    dryRun: opts.dryRun,
+    tag: opts.tag,
+    channels,
+    scanned: 0,
+    matched: 0,
+    deleted: 0,
+    failed: 0,
+    samples: [],
+  };
+  if (!env.SLACK_BOT_TOKEN || !channels.length) {
+    res.note = "no_token_or_channel";
+    return res;
+  }
+
+  for (const channel of channels) {
+    let cursor: string | undefined;
+    // Test cards are recent by nature; 5 pages of 200 is plenty and bounds the subrequest count.
+    for (let page = 0; page < 5; page++) {
+      const params = new URLSearchParams({ channel, limit: "200" });
+      if (cursor) params.set("cursor", cursor);
+      const r = await fetch("https://slack.com/api/conversations.history?" + params.toString(), {
+        headers: { authorization: `Bearer ${env.SLACK_BOT_TOKEN}` },
+      });
+      const data = (await r.json().catch(() => null)) as
+        | { ok?: boolean; error?: string; messages?: HistoryMessage[]; response_metadata?: { next_cursor?: string } }
+        | null;
+      if (!data?.ok) {
+        res.note ??= `history:${data?.error ?? "unknown"}`;
+        break;
+      }
+      for (const m of data.messages ?? []) {
+        const isBotCard = !!(m.bot_id || m.app_id || m.subtype === "bot_message") && (m.attachments?.length ?? 0) > 0;
+        if (!isBotCard || !m.ts) continue;
+        res.scanned++;
+        const title = m.attachments?.[0]?.title ?? "";
+        if (!title.includes(TEST_MARKER)) continue;
+        if (opts.tag && !title.includes(opts.tag)) continue;
+        res.matched++;
+        if (res.samples.length < 50) res.samples.push({ channel, ts: m.ts, title });
+        if (opts.dryRun) continue;
+        const del = await deleteSlack(env, channel, m.ts);
+        if (del.ok || del.error === "message_not_found") res.deleted++;
+        else res.failed++;
+      }
+      cursor = data.response_metadata?.next_cursor || undefined;
+      if (!cursor) break;
+    }
+  }
+  return res;
 }

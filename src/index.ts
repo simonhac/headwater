@@ -8,7 +8,7 @@ import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
 import { coalesceDuplicateStories } from "@/lib/coalesce";
 import { sweepOrphans } from "@/lib/orphans";
-import { sendTestPosts } from "@/lib/testpost";
+import { cleanupTestPosts, sendTestPosts } from "@/lib/testpost";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
 import { pokeStationRender, getRenderState } from "@/do/client";
 import { backfillStations } from "@/lib/backfill";
@@ -107,7 +107,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-21", // bump on each deploy to confirm the running code
+    build: "headwater-22", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
@@ -272,6 +272,11 @@ app.post("/admin/test-post", async (c) => {
     return c.text("POSTING_ENABLED is not true", 409);
   }
   try {
+    // `cleanup=1` removes test cards instead of posting them. Matched on the title marker, so it
+    // can only ever delete test cards — `/admin/orphans` would take real ones with them.
+    if (c.req.query("cleanup") === "1") {
+      return c.json(await cleanupTestPosts(c.env, { dryRun, tag: c.req.query("tag") ?? undefined }));
+    }
     return c.json(await sendTestPosts(c.env, { dryRun, briefId: c.req.query("brief") ?? undefined }));
   } catch (e) {
     return c.json({ error: String(e) }, 500);

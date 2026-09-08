@@ -30,7 +30,7 @@ Auth model (all fail-closed except the two public routes) — see [Access & secu
 | `POST /admin/redecode` | `Authorization: Bearer REPLAY_KEY` | re-render recent cards under the current decoding and `chat.update` the changed ones in place (non-destructive). `dryRun=1` previews; `hours=N` sets the window (default 168); capped at 40 updates/call (re-run until `remaining` is 0) |
 | `POST /admin/coalesce` | `Authorization: Bearer REPLAY_KEY` | coalesce broadcast duplicates that posted as separate messages **in place** — edit the oldest, delete the rest (non-destructive to the survivor). `dryRun=1` previews; `hours=N`/`all=1` set the window; capped at 40 Slack calls/call (re-run until `remaining` is 0). See [Deduplication](#deduplication) |
 | `POST /admin/replay` | `Authorization: Bearer REPLAY_KEY` | reparse + **repost** archived events (destructive — clears + reposts; prefer `/admin/redecode`) |
-| `POST /admin/test-post` | `Authorization: Bearer REPLAY_KEY` | post one synthetic card per brief to wherever `/inspect/routing` sends it, to verify routing without waiting for a Meltwater delivery. **Dry run by default** — `post=1` actually posts; `brief=<id>` limits it to one. Test cards are never stored, so they never merge with a real story |
+| `POST /admin/test-post` | `Authorization: Bearer REPLAY_KEY` | post one synthetic card per brief to wherever `/inspect/routing` sends it, to verify routing without waiting for a Meltwater delivery. **Dry run by default** — `post=1` actually posts; `brief=<id>` limits it to one. Test cards are never stored, so they never merge with a real story. `cleanup=1` deletes them again (matched on the title marker, so it can only ever remove test cards) |
 | `GET /admin/render-station?url=…` | `Authorization: Bearer REPLAY_KEY` | render a Meltwater viewer URL via Browser Rendering and return its station name (debug/verify) |
 | `GET /admin/heartbeat` | `Authorization: Bearer REPLAY_KEY` | run the ingestion-stall check on demand |
 
@@ -282,8 +282,21 @@ curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
 ```
 
 Test cards carry no `stories`/`seen_mentions` row, so they never merge with a real article and the
-call is repeatable — but the orphan sweep therefore sees them as orphans. Delete them from Slack when
-you're done, or let `POST /admin/orphans` clear them.
+call is repeatable. That also makes them orphans by construction — so clean them up with
+`?cleanup=1`, **not** `/admin/orphans`, which deletes every card lacking a story row and would take
+real ones with them:
+
+```bash
+# Dry run: list the test cards that would be deleted.
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
+  "https://feed.moofer.com/admin/test-post?cleanup=1" | jq
+
+# Delete them (add &tag=<tag from the post response> to clear just one run).
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
+  "https://feed.moofer.com/admin/test-post?cleanup=1&post=1" | jq
+```
+
+Cleanup matches on the title marker, so it can only ever remove test cards.
 
 Fanout is **per channel all the way down**: `stories.story_key` is `"<channel>|<sha256(title)>"`, so
 the same headline routed to two channels is two independent cards that merge and coalesce separately.
