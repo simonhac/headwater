@@ -101,6 +101,11 @@ describe("/inspect/routing", () => {
     expect(html).toContain(`name="r.default" value="${DEFAULT_CH}"`);
   });
 
+  it("reports what Slack returned, so an empty picker is diagnosable in place", async () => {
+    const html = await (await call("/inspect/routing")).text();
+    expect(html).toContain("slack: 3 conversations over 2 page(s), 2 with the bot as a member");
+  });
+
   it("saves a POSTed matrix, redirects, and pre-ticks it on the next render", async () => {
     const res = await call(
       "/inspect/routing",

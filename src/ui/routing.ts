@@ -67,6 +67,8 @@ export interface RoutingPageProps {
   flash?: string;
   /** Blocking problem (e.g. Slack `missing_scope`) shown instead of an empty table. */
   error?: string;
+  /** One-line "what Slack actually returned" note, so an empty picker is diagnosable in place. */
+  diagnostic?: string;
 }
 
 function briefCell(b: BriefRule, ticked: number): string {
@@ -126,6 +128,7 @@ ${p.error ? `<div class="error">${escHtml(p.error)}</div>` : ""}
 <p class="hint">A brief with nothing ticked posts to the default channel. The same headline routed to
 two channels is two separate cards — they never fold into one.</p>
 <p class="hint">Don't see a channel? <span class="mono">/invite @headwater</span> in it, then ↻ refresh.</p>
+${p.diagnostic ? `<p class="hint mono">${escHtml(p.diagnostic)}</p>` : ""}
 </main>
 </body></html>`;
 }

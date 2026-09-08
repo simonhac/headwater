@@ -106,7 +106,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-16", // bump on each deploy to confirm the running code
+    build: "headwater-17", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
@@ -365,6 +365,7 @@ app.get("/inspect/routing", async (c) => {
       defaultChannel: c.env.SLACK_DEFAULT_CHANNEL ?? "",
       flash: c.req.query("saved") ? "Routing saved." : undefined,
       error: list.error ? channelListError(list.error) : undefined,
+      diagnostic: `slack: ${list.scanned} conversations over ${list.pages} page(s), ${list.channels.length} with the bot as a member${list.truncated ? " (TRUNCATED — more pages remain)" : ""}`,
     }),
   );
 });
