@@ -26,7 +26,13 @@
     // Non-secret config. Secrets — and the deployment-specific ACCESS_TEAM_DOMAIN / ACCESS_AUD —
     // live in .dev.vars (local) and `wrangler secret put` (prod), so this public repo carries no
     // real values. Live: posts to Slack. Set to "false" to pause (pipeline still previews in /inspect).
-    "POSTING_ENABLED": "true"
+    "POSTING_ENABLED": "true",
+    // Master switch for the daily digest email (strict "true", like POSTING_ENABLED). Set to "false"
+    // to stop all mail; subscriptions and the /digest command keep working. Deliberately a var and
+    // NOT a secret: the value is not sensitive, and a config var and a secret of the same name
+    // collide on `env` (`wrangler secret put` fails with "Binding name already in use"). `wrangler
+    // dev` reads this file's vars too, so local dev needs no .dev.vars entry — same as POSTING_ENABLED.
+    "DIGEST_ENABLED": "true"
   },
   "routes": [
     // Custom Domain: Cloudflare auto-manages the DNS record + TLS cert for this host.

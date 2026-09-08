@@ -22,6 +22,11 @@ SLACK_DEFAULT_CHANNEL=op://headwater-prod/env/SLACK_DEFAULT_CHANNEL
 # Slack app Signing Secret (Basic Information) — verifies the /digest slash command on /slack/commands.
 SLACK_SIGNING_SECRET=op://headwater-prod/env/SLACK_SIGNING_SECRET
 
+# Daily digest email, delivered via Resend. The key is a send-only Resend key (it cannot list
+# domains); DIGEST_FROM must sit on a Resend-verified sending domain.
+RESEND_API_KEY=op://headwater-prod/env/RESEND_API_KEY
+DIGEST_FROM=op://headwater-prod/env/DIGEST_FROM
+
 # Cloudflare Access identifiers (verify the Access JWT on /inspect + /api). Not secrets, but vault-held.
 ACCESS_TEAM_DOMAIN=op://headwater-prod/env/ACCESS_TEAM_DOMAIN
 ACCESS_AUD=op://headwater-prod/env/ACCESS_AUD

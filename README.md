@@ -175,6 +175,8 @@ npx wrangler secret put REPLAY_KEY              # bearer token for /admin/* — 
 npx wrangler secret put SLACK_BOT_TOKEN         # xoxb-… — Slack app → OAuth & Permissions (later)
 npx wrangler secret put SLACK_DEFAULT_CHANNEL   # channel id, e.g. C0123ABCD — Slack channel → Copy link
 npx wrangler secret put SLACK_SIGNING_SECRET    # Slack app → Basic Information — enables the /digest slash command
+npx wrangler secret put RESEND_API_KEY          # re_… — resend.com → API Keys (digest email; with DIGEST_FROM below)
+npx wrangler secret put DIGEST_FROM             # From address on a Resend-verified domain, e.g. digest@example.org
 npx wrangler secret put ACCESS_TEAM_DOMAIN      # https://<team>.cloudflareaccess.com — Zero Trust → Settings
 npx wrangler secret put ACCESS_AUD              # Access → Applications → your app → Application Audience (AUD) Tag
 
@@ -305,7 +307,9 @@ known-correct URL).
 ## Wire up Slack
 1. Create a Slack app → add bot scopes `chat:write` (optionally `chat:write.public`),
    `channels:read` and `groups:read` (the channel picker on `/inspect/routing` calls
-   `conversations.list` over public + private channels), plus `users:read` and `users:read.email`
+   `users.conversations` over public + private channels), `channels:history` and `groups:history`
+   (`/admin/replay` and `/admin/orphans` read `conversations.history` to find the bot's own cards),
+   plus `users:read` and `users:read.email`
    (the `/digest` slash command reads the caller's profile email + time zone) → install → copy the
    `xoxb-…` token.
 2. Create the channel and `/invite` the bot. The picker only offers channels the bot is a member of.

@@ -116,7 +116,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-32", // bump on each deploy to confirm the running code
+    build: "headwater-35", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     digestEnabled: c.env.DIGEST_ENABLED === "true",
     digestSubscribers: subscribers, // count only — addresses stay in D1
