@@ -30,6 +30,7 @@ Auth model (all fail-closed except the two public routes) — see [Access & secu
 | `POST /admin/redecode` | `Authorization: Bearer REPLAY_KEY` | re-render recent cards under the current decoding and `chat.update` the changed ones in place (non-destructive). `dryRun=1` previews; `hours=N` sets the window (default 168); capped at 40 updates/call (re-run until `remaining` is 0) |
 | `POST /admin/coalesce` | `Authorization: Bearer REPLAY_KEY` | coalesce broadcast duplicates that posted as separate messages **in place** — edit the oldest, delete the rest (non-destructive to the survivor). `dryRun=1` previews; `hours=N`/`all=1` set the window; capped at 40 Slack calls/call (re-run until `remaining` is 0). See [Deduplication](#deduplication) |
 | `POST /admin/replay` | `Authorization: Bearer REPLAY_KEY` | reparse + **repost** archived events (destructive — clears + reposts; prefer `/admin/redecode`) |
+| `POST /admin/test-post` | `Authorization: Bearer REPLAY_KEY` | post one synthetic card per brief to wherever `/inspect/routing` sends it, to verify routing without waiting for a Meltwater delivery. **Dry run by default** — `post=1` actually posts; `brief=<id>` limits it to one. Test cards are never stored, so they never merge with a real story |
 | `GET /admin/render-station?url=…` | `Authorization: Bearer REPLAY_KEY` | render a Meltwater viewer URL via Browser Rendering and return its station name (debug/verify) |
 | `GET /admin/heartbeat` | `Authorization: Bearer REPLAY_KEY` | run the ingestion-stall check on demand |
 
@@ -258,8 +259,31 @@ known-correct URL).
 ### Routing briefs to channels — `/inspect/routing`
 Each brief fans out to one or more Slack channels. The matrix (rows = briefs, columns = the channels
 the bot is in) is stored in D1 (`ops_state.routing`), so changing it needs **no redeploy** and no
-channel id ever enters this repo. A brief with nothing ticked posts to `SLACK_DEFAULT_CHANNEL`, which
-is what every brief did before routing existed — an empty matrix is the old single-channel behaviour.
+channel id ever enters this repo.
+
+A tick means "this channel receives this brief" — that is the whole rule. Two states look similar and
+are not: a brief that has **never been routed** posts to `SLACK_DEFAULT_CHANNEL` (its default-column
+tick renders greyed, and saving makes it explicit), whereas a brief saved with **every box unticked**
+is *muted* and posts nowhere. So a never-saved matrix reproduces the old single-channel behaviour
+exactly, while unticking a row is a deliberate off switch. Muted mentions are still recorded as
+`dropped` in `/inspect` (reason `muted: no channel routed for this brief`) and `/health` raises a
+`routing.muted` warning, so a muted brief can't be mistaken for a dead feed.
+
+To check routing without waiting for a delivery — and for a brief whose Meltwater search is quiet or
+not yet bound, this is the only way to check at all:
+
+```bash
+# Dry run (default): report where each brief WOULD go, post nothing.
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" https://feed.moofer.com/admin/test-post | jq
+
+# Actually post, one brief only.
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
+  "https://feed.moofer.com/admin/test-post?post=1&brief=vic-state" | jq
+```
+
+Test cards carry no `stories`/`seen_mentions` row, so they never merge with a real article and the
+call is repeatable — but the orphan sweep therefore sees them as orphans. Delete them from Slack when
+you're done, or let `POST /admin/orphans` clear them.
 
 Fanout is **per channel all the way down**: `stories.story_key` is `"<channel>|<sha256(title)>"`, so
 the same headline routed to two channels is two independent cards that merge and coalesce separately.

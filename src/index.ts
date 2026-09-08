@@ -8,6 +8,7 @@ import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
 import { coalesceDuplicateStories } from "@/lib/coalesce";
 import { sweepOrphans } from "@/lib/orphans";
+import { sendTestPosts } from "@/lib/testpost";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
 import { pokeStationRender, getRenderState } from "@/do/client";
 import { backfillStations } from "@/lib/backfill";
@@ -106,7 +107,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-20", // bump on each deploy to confirm the running code
+    build: "headwater-21", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
@@ -251,6 +252,27 @@ app.post("/admin/coalesce", async (c) => {
   try {
     const result = await coalesceDuplicateStories(c.env, { hours, dryRun, now: Date.now() });
     return c.json(result);
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
+// --- admin: post one synthetic card per brief, to wherever /inspect/routing sends that brief.
+// Verifies routing without waiting for a Meltwater delivery (and for briefs whose search is quiet,
+// it's the ONLY way to check). Gated by REPLAY_KEY. Defaults to a DRY RUN — pass `post=1` to
+// actually post. `brief=<id>` limits it to one brief. Test cards are not stored, so they never
+// merge with a real story; delete them from Slack when you're done. ---
+app.post("/admin/test-post", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  // Opt IN to posting: the harmless spelling is the one you get by accident.
+  const dryRun = c.req.query("post") !== "1";
+  if (!dryRun && c.env.POSTING_ENABLED !== "true") {
+    return c.text("POSTING_ENABLED is not true", 409);
+  }
+  try {
+    return c.json(await sendTestPosts(c.env, { dryRun, briefId: c.req.query("brief") ?? undefined }));
   } catch (e) {
     return c.json({ error: String(e) }, 500);
   }
