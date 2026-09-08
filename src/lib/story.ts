@@ -209,14 +209,6 @@ export class StoryStore {
     return res.results ?? [];
   }
 
-  /** After a re-decode+chat.update: store the corrected snapshot + new render hash; recency untouched. */
-  async updateRenderState(key: string, primary: unknown, renderHash: string): Promise<void> {
-    await this.db
-      .prepare(`UPDATE stories SET primary_mention_json = ?, render_hash = ? WHERE story_key = ?`)
-      .bind(JSON.stringify(primary), renderHash, key)
-      .run();
-  }
-
   /** Broadcast stories (carry a SimHash) CREATED within the window — the coalesce backfill's
    * candidate set. Ordered oldest-first so star-clustering anchors on the original card. Note: no
    * `created_at` index exists (only `updated_at`/`simhash`), so this is a bounded full scan — fine
@@ -235,10 +227,10 @@ export class StoryStore {
   }
 
   /**
-   * Rewrite the stored text of a story WITHOUT touching `updated_at` — for data repairs (e.g. the
-   * snippet backfill) rather than new activity. Bumping recency here would be actively harmful: it
-   * would drag a long-settled story back inside the 72h syndication window and make it a live merge
-   * target again. Mirrors `updateRenderState`, which leaves recency alone for the same reason.
+   * Rewrite a story's stored snapshot — the anchor mention, the outlet list and the render hash —
+   * WITHOUT touching `updated_at`. For data repairs (the snippet backfill, the redecode sweep) rather
+   * than new activity: bumping recency here would be actively harmful, dragging a long-settled story
+   * back inside the 72h syndication window and making it a live merge target again.
    */
   async repairText(key: string, primary: unknown, outlets: Outlet[], renderHash: string | null): Promise<void> {
     await this.db

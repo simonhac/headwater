@@ -2,7 +2,7 @@ import type { Env } from "@/env";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { SlackAttachment } from "@/lib/slack/format";
 import { parseWebhookPayload, isBroadcastMedium } from "@/lib/meltwater/parse";
-import { looksLikePerson } from "@/lib/meltwater/outlets";
+import { hostnameOf, looksLikePerson, mastheadForDomain } from "@/lib/meltwater/outlets";
 import { resolveBrief } from "@/lib/filter/engine";
 import { buildStoryAttachment, attachmentHash, broadcastMediumLabel, sameText } from "@/lib/slack/format";
 import { updateSlack } from "@/lib/slack/post";
@@ -25,11 +25,15 @@ export interface RedecodeResult {
   failed: number; // chat.update calls that failed
   unchanged: number; // re-render identical → left untouched
   skipped: number; // no re-parseable raw payload in the snapshot
-  remaining: number; // changed cards left unsent because the per-call cap was hit — re-run to finish
+  remaining: number; // stories left unfixed because the per-call write cap was hit — re-run to finish
+  repaired: number; // stored names fixed without a Slack call (the card renders identically)
+  outletsRenamed: number; // stories whose stored outlet names were brought up to date
   changes: RedecodeChange[]; // headline before→after (capped)
+  outletRenames: RedecodeChange[]; // stored outlet name before→after (capped)
 }
 
 const MAX_CHANGES_REPORTED = 200;
+
 // Cap chat.update calls per invocation to stay under Cloudflare's per-request subrequest limit. Excess
 // changed cards are reported as `remaining`; re-run (it's idempotent) until `remaining` is 0.
 const MAX_UPDATES_PER_CALL = 40;
@@ -43,6 +47,36 @@ export function reparseStory(row: StoryRow): { oldPrimary: NormalizedMention; re
   const oldPrimary = JSON.parse(row.primary_mention_json) as NormalizedMention;
   const reparsed = oldPrimary.raw != null ? (parseWebhookPayload(oldPrimary.raw)[0] ?? null) : null;
   return { oldPrimary, reparsed };
+}
+
+/**
+ * Pure: bring a story's stored outlet names up to date with the current masthead table.
+ *
+ * The anchor in `primary_mention_json` keeps its `raw` and so can simply be reparsed, but the entries
+ * in `outlets_json` never stored one — they can't be re-decoded, only re-named. Each does keep the
+ * publisher URL it was built from, which is all `mastheadForDomain` needs. This matters because a
+ * merged story's card can be led by an outlet rather than the anchor (`buildStoryAttachment`), so a
+ * stale name here is a wrong HEADLINE, not just a wrong footer entry.
+ *
+ * Only ever replaces a name with a mapped masthead: it never derives one from the domain, so an outlet
+ * we can't name stays exactly as it is. Entries predating the reach-led code have no `outletUrl` and
+ * are skipped (there are none inside redecode's usual windows). Idempotent.
+ *
+ * BROADCAST IS EXCLUDED. A station name belongs to the station-resolve pipeline, not to this table —
+ * abc.net.au maps to the plain "ABC", so remapping a radio entry would demote a resolved
+ * "ABC Central Coast NSW" back to "ABC". Same reasoning as {@link resolveBroadcast}'s rule 3 and the
+ * broadcast branch of the parser: never regress a specific station to a generic masthead.
+ */
+export function remapOutletNames(outlets: Outlet[]): { outlets: Outlet[]; renames: { from: string; to: string }[] } {
+  const renames: { from: string; to: string }[] = [];
+  const next = outlets.map((o) => {
+    if (isBroadcastMedium(o.mediaType ?? null)) return o;
+    const masthead = mastheadForDomain(hostnameOf(o.outletUrl ?? null));
+    if (!masthead || masthead === o.name) return o;
+    renames.push({ from: o.name, to: masthead });
+    return { ...o, name: masthead };
+  });
+  return { outlets: renames.length ? next : outlets, renames };
 }
 
 /**
@@ -96,7 +130,10 @@ export function renderStoryCard(
  * format, and chat.update in place any whose rendering changed. Non-destructive: edits existing
  * messages, never deletes/reposts, so reactions/threads survive. Broadcast headers are re-resolved from
  * the D1 station map (no browser here — that runs at ingestion), so a station named since the card was
- * posted is upgraded from the reporter byline. `dryRun` reports what would change without calling Slack.
+ * posted is upgraded from the reporter byline. Stored outlet names are re-mapped too
+ * ({@link remapOutletNames}) — the anchor is the only mention that can be reparsed, so without that a
+ * merged card led by an outlet would keep a stale masthead in its headline. `dryRun` reports what would
+ * change without calling Slack.
  * Bounded by recency (idx_stories_updated_at) and by {@link MAX_UPDATES_PER_CALL} per call. `now` is
  * passed in (route uses Date.now()) to keep this deterministic.
  */
@@ -117,7 +154,10 @@ export async function redecodeRecentStories(
     unchanged: 0,
     skipped: 0,
     remaining: 0,
+    repaired: 0,
+    outletsRenamed: 0,
     changes: [],
+    outletRenames: [],
   };
 
   for (const row of rows) {
@@ -129,28 +169,48 @@ export async function redecodeRecentStories(
     const primary = isBroadcastMedium(reparsed.mediaType)
       ? resolveBroadcast(reparsed, oldPrimary, await resolveStationName(env, reparsed.raw))
       : reparsed;
-    const { attachment, hash } = renderStoryCard(row, primary);
-    if (row.render_hash === hash) {
+    const { outlets, renames } = remapOutletNames(JSON.parse(row.outlets_json) as Outlet[]);
+    const { attachment, hash } = renderStoryCard(row, primary, renames.length ? outlets : undefined);
+    const cardChanged = row.render_hash !== hash;
+    if (!cardChanged && renames.length === 0) {
       res.unchanged++;
       continue;
     }
-    res.changed++;
-    if (res.changes.length < MAX_CHANGES_REPORTED) {
-      res.changes.push({ ts: row.slack_ts, from: oldPrimary.sourceName ?? "", to: primary.sourceName ?? "" });
+    if (renames.length) {
+      res.outletsRenamed++;
+      for (const r of renames) {
+        if (res.outletRenames.length < MAX_CHANGES_REPORTED) res.outletRenames.push({ ts: row.slack_ts, ...r });
+      }
+    }
+    if (cardChanged) {
+      res.changed++;
+      if (res.changes.length < MAX_CHANGES_REPORTED) {
+        res.changes.push({ ts: row.slack_ts, from: oldPrimary.sourceName ?? "", to: primary.sourceName ?? "" });
+      }
     }
     if (opts.dryRun) continue;
-    // Per-call cap: once we've made enough Slack calls this request, leave the rest for a re-run rather
-    // than risk hitting the subrequest limit mid-flight. `failed` attempts count too (they still fetch).
-    if (res.updated + res.failed >= MAX_UPDATES_PER_CALL) {
+    // Per-call cap: once we've done enough work this request, leave the rest for a re-run rather than
+    // risk hitting the subrequest limit mid-flight. Data-only repairs share the budget (they still
+    // write to D1); `failed` attempts count too, since they still fetch.
+    if (res.updated + res.failed + res.repaired >= MAX_UPDATES_PER_CALL) {
       res.remaining++;
+      continue;
+    }
+
+    // Persist the corrected snapshot + names + new render hash so later syndication merges keep the fix
+    // (rather than reviving the stale decoding from primary_mention_json) and re-runs stay idempotent.
+    // `repairText` leaves `updated_at` alone — this is a repair, not new activity on the story.
+    if (!cardChanged) {
+      // Renames only reached outlets the card doesn't show (the footer list is capped): fix the stored
+      // data, but don't spend a chat.update re-sending an identical card.
+      await stories.repairText(row.story_key, primary, outlets, hash);
+      res.repaired++;
       continue;
     }
 
     const upd = await updateSlack(env, { channel: row.channel, ts: row.slack_ts, attachments: [attachment] });
     if (upd.ok) {
-      // Persist the corrected snapshot + new render hash so later syndication merges keep the fix
-      // (rather than reviving the stale decoding from primary_mention_json) and re-runs stay idempotent.
-      await stories.updateRenderState(row.story_key, primary, hash);
+      await stories.repairText(row.story_key, primary, outlets, hash);
       res.updated++;
     } else {
       res.failed++;
