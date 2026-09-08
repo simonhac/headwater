@@ -93,21 +93,21 @@ describe("digestSubject", () => {
 describe("mailer config", () => {
   const full: Partial<Env> = {
     RESEND_API_KEY: "re_" + "a".repeat(30),
-    DIGEST_FROM: "daily@climate200.com.au",
-    DIGEST_TO: "simon@climate200.com.au",
+    DIGEST_FROM: "digest@example.org",
+    DIGEST_TO: "you@example.org",
   };
 
   it("builds a config from a complete env", () => {
     const cfg = mailerConfig(full as Env);
     expect("error" in cfg).toBe(false);
     if (!("error" in cfg)) {
-      expect(cfg.to).toEqual(["simon@climate200.com.au"]);
+      expect(cfg.to).toEqual(["you@example.org"]);
       expect(cfg.fromName).toBe("Headwater"); // default
     }
   });
 
   it("names exactly what is missing rather than throwing", () => {
-    const cfg = mailerConfig({ DIGEST_FROM: "daily@climate200.com.au" } as Env);
+    const cfg = mailerConfig({ DIGEST_FROM: "digest@example.org" } as Env);
     expect("error" in cfg && cfg.error).toContain("RESEND_API_KEY");
     expect("error" in cfg && cfg.error).toContain("DIGEST_TO");
   });
@@ -120,7 +120,7 @@ describe("mailer config", () => {
 
 describe("formatFrom", () => {
   it("builds the Resend single-string From header", () => {
-    expect(formatFrom("Headwater", "daily@climate200.com.au")).toBe('"Headwater" <daily@climate200.com.au>');
+    expect(formatFrom("Headwater", "digest@example.org")).toBe('"Headwater" <digest@example.org>');
   });
 
   it("escapes a quote or backslash in the display name, which would break the header", () => {
@@ -146,8 +146,8 @@ describe("digest config validation", () => {
     ...CORE,
     DIGEST_ENABLED: "true",
     RESEND_API_KEY: "re_" + "a".repeat(30),
-    DIGEST_FROM: "daily@climate200.com.au",
-    DIGEST_TO: "simon@climate200.com.au",
+    DIGEST_FROM: "digest@example.org",
+    DIGEST_TO: "you@example.org",
   } as Env;
 
   const issuesFor = (env: Partial<Env>) => summarizeConfig(validateConfig(env as Env)).issues.map((i) => i.name);
@@ -198,6 +198,6 @@ describe("digest config validation", () => {
     const token = "super-secret-token-value-1234567890";
     const detail = JSON.stringify(validateConfig({ ...on, DIGEST_API_TOKEN: "short" } as Env));
     expect(detail).not.toContain(token);
-    expect(detail).not.toContain("simon@climate200.com.au");
+    expect(detail).not.toContain("you@example.org");
   });
 });

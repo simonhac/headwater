@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { SlackAttachment } from "@/lib/slack/format";
 import { escHtml, mrkdwnText, safeUrl, renderCardBody, decisionPill } from "@/ui/card";
+import { ICON_BASE_URL } from "@/lib/slack/icons";
 
 describe("escHtml", () => {
   it("entity-encodes &, <, >, \"", () => {
@@ -66,7 +67,7 @@ describe("renderCardBody", () => {
     title_link: "https://x.example/a",
     text: "The `renewable` rollout and `Ross Garnaut`.",
     footer: "Wed, 8 Jul 2026, 8:30am AEST  ·  Brief: Key People 😐  ·  480K reach",
-    footer_icon: "https://feed.moofer.com/icons/media/v1/newspaper.png",
+    footer_icon: `${ICON_BASE_URL}/icons/media/v1/newspaper.png`,
     mrkdwn_in: ["text"],
   };
 
@@ -76,7 +77,7 @@ describe("renderCardBody", () => {
     expect(html).toContain('<a class="att-title sr-link" href="https://x.example/a"');
     expect(html).toContain('<code class="sr-inline-code">renewable</code>');
     expect(html).toContain(
-      '<img class="att-footer-icon" src="https://feed.moofer.com/icons/media/v1/newspaper.png"',
+      `<img class="att-footer-icon" src="${ICON_BASE_URL}/icons/media/v1/newspaper.png"`,
     );
     expect(html).toContain("Brief: Key People");
     expect(html).toContain("480K reach");

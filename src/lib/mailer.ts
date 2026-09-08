@@ -4,10 +4,9 @@ import type { Env } from "@/env";
  * Resend mail client.
  *
  * Chosen over Cloudflare Email Sending because Email Sending requires the Workers Paid plan **on the
- * account that owns the sending domain** — that's the Climate 200 account, which is on the free plan,
- * so it would have meant a second $5/month subscription. Resend is already in use and already
- * verified for climate200.com.au (DKIM at `resend._domainkey`, bounce MX on `send.`, and the apex SPF
- * includes `amazonses.com`, which is what Resend sends over), so this needs no new DNS.
+ * account that owns the sending domain**, which is not necessarily the account running this Worker —
+ * so it can mean a second subscription purely to send mail. Resend was already in use with the
+ * sending domain verified (DKIM, a bounce subdomain, and SPF), so this route needed no new DNS.
  *
  * Everything here is behind `sendEmail(cfg, msg)`; swapping providers again means editing this file
  * only. The digest, renderer and scheduling know nothing about who delivers the mail.

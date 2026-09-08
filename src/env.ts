@@ -51,12 +51,12 @@ export interface Env {
 
   // --- daily digest email (src/lib/digestSend.ts), delivered via Resend (src/lib/mailer.ts).
   // Cloudflare Email Sending would have needed Workers Paid on the account owning the sending
-  // domain — a second subscription — while Resend is already verified for climate200.com.au. ---
+  // domain — a second subscription — while the sending domain is already verified in Resend. ---
   /** Master switch, strict `=== "true"` like POSTING_ENABLED. Anything else = no mail is ever sent. */
   DIGEST_ENABLED?: string;
   /** Resend API key, `re_…` (secret). */
   RESEND_API_KEY?: string;
-  /** From address on a Resend-verified domain — e.g. daily@climate200.com.au */
+  /** From address on a Resend-verified domain — e.g. digest@example.org */
   DIGEST_FROM?: string;
   /** Display name for the From header (default "Headwater"). */
   DIGEST_FROM_NAME?: string;

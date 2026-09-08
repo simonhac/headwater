@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-11-01",
   "compatibility_flags": ["nodejs_compat"],
-  // Only served on the custom domain (feed.moofer.com); disable the workers.dev URL so it can't be
+  // Only served on the custom domain configured below; disable the workers.dev URL so it can't be
   // used to reach the Worker around Cloudflare Access.
   "workers_dev": false,
   "observability": {

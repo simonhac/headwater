@@ -7,6 +7,7 @@ import { sourceLogoUrl, faviconUrl, mediaTypeEmoji } from "@/lib/slack/icons";
 import { normalizeTitle, storyKeyAt, storyKeyPrefix, addOutlet, addBriefLabel, type Outlet } from "@/lib/story";
 import { simhash64, hammingDistance, tokenize, shingles } from "@/lib/simhash";
 import { DEFAULT_BRIEF_COLOR, type FeedConfig } from "@/config/feed.config";
+import { ICON_BASE_URL } from "@/lib/slack/icons";
 
 const cfg: FeedConfig = {
   minSourceReach: 100000,
@@ -142,7 +143,7 @@ describe("format", () => {
     expect(a.title).toBe("Big renewable news");
     expect(a.title_link).toBe("https://x.example/a");
     expect(a.footer).toContain("Brief: Key People");
-    expect(a.footer_icon).toContain("https://feed.moofer.com/icons/media/v1/newspaper.png"); // news → newspaper
+    expect(a.footer_icon).toContain(`${ICON_BASE_URL}/icons/media/v1/newspaper.png`); // news → newspaper
     expect(a.mrkdwn_in).toContain("text");
   });
 

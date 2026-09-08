@@ -3,6 +3,7 @@ import { buildAttachment, buildStoryAttachment, buildPostPayload, broadcastMediu
 import { outletOf } from "@/lib/story";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { BriefRule } from "@/config/feed.config";
+import { ICON_BASE_URL } from "@/lib/slack/icons";
 
 // A complete NormalizedMention with sensible defaults; override per-test via `over`.
 function mention(over: Partial<NormalizedMention> = {}): NormalizedMention {
@@ -70,7 +71,7 @@ describe("buildAttachment — author icon / masthead", () => {
     );
     expect(a.author_icon).toBeUndefined();
     expect(a.author_name).toBe("Nowhere Gazette"); // medium now lives in the footer icon, not a prefix
-    expect(a.footer_icon).toContain("https://feed.moofer.com/icons/media/v1/radio.png");
+    expect(a.footer_icon).toContain(`${ICON_BASE_URL}/icons/media/v1/radio.png`);
   });
 
   it("falls back to 'Unknown source' when sourceName is null", () => {
@@ -80,7 +81,7 @@ describe("buildAttachment — author icon / masthead", () => {
     );
     expect(a.author_icon).toBeUndefined();
     expect(a.author_name).toBe("Unknown source");
-    expect(a.footer_icon).toContain("https://feed.moofer.com/icons/media/v1/newspaper.png"); // null mediaType → newspaper
+    expect(a.footer_icon).toContain(`${ICON_BASE_URL}/icons/media/v1/newspaper.png`); // null mediaType → newspaper
   });
 });
 
@@ -207,7 +208,7 @@ describe("broadcast safety net (unresolved station never shows a person as the o
       brief,
     );
     expect(a.author_name).toBe("Radio — Zann Maxwell"); // neutral medium masthead + presenter byline
-    expect(a.footer_icon).toContain("https://feed.moofer.com/icons/media/v1/radio.png");
+    expect(a.footer_icon).toContain(`${ICON_BASE_URL}/icons/media/v1/radio.png`);
   });
 
   it("drops the byline when it just repeats the headline (host-named show, Tom Elliott case)", () => {
@@ -442,7 +443,7 @@ describe("buildAttachment — footer", () => {
 });
 
 describe("buildAttachment — footer_icon (media-type Lucide PNG)", () => {
-  const base = (slug: string) => `https://feed.moofer.com/icons/media/v1/${slug}.png`;
+  const base = (slug: string) => `${ICON_BASE_URL}/icons/media/v1/${slug}.png`;
   const iconOf = (mt: string | null) => buildAttachment(mention({ mediaType: mt }), brief).footer_icon!;
   it("maps each media type to its Lucide icon URL, defaulting to newspaper", () => {
     expect(iconOf("radio")).toContain(base("radio"));

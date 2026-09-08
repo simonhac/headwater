@@ -3,6 +3,8 @@ import type { SlackAttachment } from "@/lib/slack/format";
 import { emailMrkdwn, renderEmailTile, renderDigestEmail, renderDigestText, compactReachText } from "@/ui/email";
 import { buildDigestModel, combinedReach, colorForBriefLabel, digestIdentity } from "@/lib/digest";
 import type { StoryRow } from "@/lib/story";
+import { feedConfig } from "@/config/feed.config";
+import { ICON_BASE_URL } from "@/lib/slack/icons";
 
 // Test window: comfortably brackets every fixture's created_at, with real (formattable) timestamps.
 const WINDOW_END = Date.UTC(2026, 5, 18);
@@ -12,13 +14,13 @@ function att(over: Partial<SlackAttachment> = {}): SlackAttachment {
   return {
     color: "#f76707",
     fallback: "The Age: Something happened",
-    author_name: "The Age — Rob Harris",
+    author_name: "The Age — A. Reporter",
     author_icon: "https://www.google.com/s2/favicons?sz=64&amp;domain=theage.com.au",
     title: "Something happened",
     title_link: "https://app.meltwater.com/mm/redirect/abc",
-    text: "A snippet mentioning `Climate 200` today.",
-    footer: "Thu, 11 Jun 2026, 6:02am AEST  ·  Brief: Climate 200 😐  ·  5M reach",
-    footer_icon: "https://feed.moofer.com/icons/media/v1/globe.png",
+    text: "A snippet mentioning `Energy Policy` today.",
+    footer: "Thu, 11 Jun 2026, 6:02am AEST  ·  Brief: Energy Policy 😐  ·  5M reach",
+    footer_icon: `${ICON_BASE_URL}/icons/media/v1/globe.png`,
     mrkdwn_in: ["text"],
     ...over,
   };
@@ -26,9 +28,9 @@ function att(over: Partial<SlackAttachment> = {}): SlackAttachment {
 
 describe("emailMrkdwn — the email twin of mrkdwnText", () => {
   it("turns a backtick code span into an inline-styled pill (no class)", () => {
-    const out = emailMrkdwn("A shift `Climate 200` warned about.");
+    const out = emailMrkdwn("A shift `Energy Policy` warned about.");
     expect(out).toContain("<code style=");
-    expect(out).toContain(">Climate 200</code>");
+    expect(out).toContain(">Energy Policy</code>");
     expect(out).not.toContain("sr-inline-code");
     expect(out).toContain("color:rgb(192,19,67)"); // the pill colour must survive inlining
   });
@@ -57,11 +59,11 @@ describe("emailMrkdwn — the email twin of mrkdwnText", () => {
 describe("renderEmailTile", () => {
   it("renders masthead, headline, excerpt and footer from the attachment", () => {
     const html = renderEmailTile(att());
-    expect(html).toContain("The Age — Rob Harris");
+    expect(html).toContain("The Age — A. Reporter");
     expect(html).toContain("Something happened");
     expect(html).toContain("https://app.meltwater.com/mm/redirect/abc");
-    expect(html).toContain("Brief: Climate 200 😐");
-    expect(html).toContain("https://feed.moofer.com/icons/media/v1/globe.png");
+    expect(html).toContain("Brief: Energy Policy 😐");
+    expect(html).toContain(`${ICON_BASE_URL}/icons/media/v1/globe.png`);
   });
 
   it("paints the brief colour as a border-left, not a ::before pseudo-element", () => {
@@ -102,7 +104,7 @@ describe("renderEmailTile", () => {
 
 describe("renderDigestEmail — email safety", () => {
   const digest = buildDigestModel(
-    [row({ story_key: "a", brief_labels_json: '["Climate 200"]', outlets_json: '[{"name":"The Age","url":null,"reach":5000000}]' })],
+    [row({ story_key: "a", brief_labels_json: '["Energy Policy"]', outlets_json: '[{"name":"The Age","url":null,"reach":5000000}]' })],
     0,
     WINDOW_END,
   );
@@ -120,16 +122,28 @@ describe("renderDigestEmail — email safety", () => {
     expect(html).toContain("max-width: 660px");
   });
 
-  it("renders the section header with the brief colour and story count", () => {
+  it("renders the section header with the story count", () => {
     const html = renderDigestEmail(digest);
-    expect(html).toContain("CLIMATE 200");
-    expect(html).toContain("#f76707");
+    expect(html).toContain("ENERGY POLICY"); // label is upper-cased in the section header
     expect(html).toContain("1 story"); // singular, not "1 stories"
+  });
+
+  it("paints the section swatch with the configured brief's colour", () => {
+    // Derived from feed.config.ts rather than hardcoded, so this test carries no brief name and
+    // survives briefs being added, renamed or recoloured.
+    const brief = feedConfig.briefs[0]!;
+    const d = buildDigestModel([row({ brief_labels_json: JSON.stringify([brief.label]) })], 0, WINDOW_END);
+    expect(renderDigestEmail(d)).toContain(brief.color ?? "#868e96");
+  });
+
+  it("falls back to the default swatch for a brief that is not configured", () => {
+    const d = buildDigestModel([row({ brief_labels_json: '["No Such Brief"]' })], 0, WINDOW_END);
+    expect(renderDigestEmail(d)).toContain("#868e96");
   });
 
   it("produces a text/plain alternative carrying the same headline and footer", () => {
     const text = renderDigestText(digest);
-    expect(text).toContain("CLIMATE 200");
+    expect(text).toContain("ENERGY POLICY");
     expect(text).toContain("Something happened");
     expect(text).not.toContain("<td");
   });
@@ -149,14 +163,14 @@ describe("buildDigestModel", () => {
   it("groups by primary brief and orders sections + tiles by reach desc", () => {
     const d = buildDigestModel(
       [
-        row({ story_key: "small", brief_labels_json: '["Teals"]', outlets_json: '[{"name":"Capital Brief","url":null,"reach":85200}]' }),
-        row({ story_key: "big", brief_labels_json: '["Climate 200"]', outlets_json: '[{"name":"SMH","url":null,"reach":5000000}]' }),
-        row({ story_key: "mid", brief_labels_json: '["Climate 200"]', outlets_json: '[{"name":"Herald Sun","url":null,"reach":513000}]' }),
+        row({ story_key: "small", brief_labels_json: '["Regional Health"]', outlets_json: '[{"name":"Capital Brief","url":null,"reach":85200}]' }),
+        row({ story_key: "big", brief_labels_json: '["Energy Policy"]', outlets_json: '[{"name":"SMH","url":null,"reach":5000000}]' }),
+        row({ story_key: "mid", brief_labels_json: '["Energy Policy"]', outlets_json: '[{"name":"Herald Sun","url":null,"reach":513000}]' }),
       ],
       0,
       WINDOW_END,
     );
-    expect(d.sections.map((s) => s.label)).toEqual(["Climate 200", "Teals"]);
+    expect(d.sections.map((s) => s.label)).toEqual(["Energy Policy", "Regional Health"]);
     expect(d.sections[0]!.tiles.map((t) => t.storyKey)).toEqual(["big", "mid"]);
     expect(d.sections[0]!.totalReach).toBe(5_513_000);
     expect(d.storyCount).toBe(3);
@@ -259,7 +273,7 @@ function row(over: Partial<StoryRow> = {}): StoryRow {
     story_key: "k",
     slack_ts: "1.0",
     channel: "C1",
-    brief_label: "Climate 200",
+    brief_label: "Energy Policy",
     primary_mention_json: JSON.stringify({
       url: "https://x.example/a",
       outletUrl: null,
@@ -270,15 +284,15 @@ function row(over: Partial<StoryRow> = {}): StoryRow {
       reach: 5000000,
       sentiment: "neutral",
       publishedAt: "2026-06-11T06:02:00+10:00",
-      snippet: "A snippet mentioning Climate 200 today.",
-      author: "Rob Harris",
-      briefName: "Climate 200",
+      snippet: "A snippet mentioning Energy Policy today.",
+      author: "A. Reporter",
+      briefName: "Energy Policy",
       imageUrl: null,
-      matchedKeywords: ["Climate 200"],
+      matchedKeywords: ["Energy Policy"],
       raw: null,
     }),
     outlets_json: '[{"name":"The Age","url":"https://x.example/a","reach":5000000}]',
-    brief_labels_json: '["Climate 200"]',
+    brief_labels_json: '["Energy Policy"]',
     simhash: null,
     media_type: "online_news",
     render_hash: null,

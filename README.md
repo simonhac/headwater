@@ -233,7 +233,7 @@ It reports names and reasons only, never values.
 | `DIGEST_ENABLED` | var | yes | Strict `"true"` to actually send. Anything else = no mail is ever sent |
 | `DIGEST_CF_ACCOUNT_ID` | secret | yes | Cloudflare account id (32-char hex) owning the onboarded sending domain |
 | `DIGEST_API_TOKEN` | secret | yes | API token scoped to Email Sending on that account |
-| `DIGEST_FROM` | secret | yes | From address on the onboarded domain, e.g. `daily@news.climate200.com.au` |
+| `DIGEST_FROM` | secret | yes | From address on the onboarded domain, e.g. `digest@news.example.org` |
 | `DIGEST_TO` | secret | yes | Recipients, comma- or whitespace-separated |
 | `DIGEST_FROM_NAME` | var | no (`Headwater`) | Display name on the From header |
 | `DIGEST_REPLY_TO` | var | no | Set this if `DIGEST_FROM` isn't a real mailbox, so replies don't bounce |
@@ -332,11 +332,11 @@ not yet bound, this is the only way to check at all:
 
 ```bash
 # Dry run (default): report where each brief WOULD go, post nothing.
-curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" https://feed.moofer.com/admin/test-post | jq
+curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" https://<your-host>/admin/test-post | jq
 
 # Actually post, one brief only.
 curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
-  "https://feed.moofer.com/admin/test-post?post=1&brief=vic-state" | jq
+  "https://<your-host>/admin/test-post?post=1&brief=vic-state" | jq
 ```
 
 Test cards carry no `stories`/`seen_mentions` row, so they never merge with a real article and the
@@ -347,11 +347,11 @@ real ones with them:
 ```bash
 # Dry run: list the test cards that would be deleted.
 curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
-  "https://feed.moofer.com/admin/test-post?cleanup=1" | jq
+  "https://<your-host>/admin/test-post?cleanup=1" | jq
 
 # Delete them (add &tag=<tag from the post response> to clear just one run).
 curl -fsS -X POST -H "Authorization: Bearer $REPLAY_KEY" \
-  "https://feed.moofer.com/admin/test-post?cleanup=1&post=1" | jq
+  "https://<your-host>/admin/test-post?cleanup=1&post=1" | jq
 ```
 
 Cleanup matches on the title marker, so it can only ever remove test cards.
@@ -380,13 +380,13 @@ account as the token used to send. Because this Worker's account and the sending
 digest uses the **REST API** (`src/lib/mailer.ts`) rather than the `send_email` binding — the binding
 can only see domains onboarded in the Worker's own account.
 
-Onboard a **subdomain** (e.g. `news.climate200.com.au`) rather than the apex: the subdomain gets its own
+Onboard a **subdomain** (e.g. `news.example.org`) rather than the apex: the subdomain gets its own
 SPF record, leaving the parent domain's existing SPF/DKIM/MX — i.e. your real corporate mail — untouched.
 
 ```bash
 # run against the account that owns the zone (dashboard: Compute & AI → Email Service → Email Sending)
-npx wrangler email sending enable news.climate200.com.au
-npx wrangler email sending dns get news.climate200.com.au   # verify the SPF + DKIM records
+npx wrangler email sending enable news.example.org
+npx wrangler email sending dns get news.example.org   # verify the SPF + DKIM records
 ```
 This writes DNS records, so it needs credentials for that account with Email Sending **and** DNS write.
 
@@ -436,7 +436,7 @@ Work top-down — the first item is the most common cause and the cheapest to ch
    connection → Save.** A silent feed with a healthy `/health` is almost always this. Two traps:
    the binding lives per-alert (tick it on **all** the alerts you want, not just one), and
    **re-adding a webhook connection drops the binding**, so always re-check after a re-add.
-2. **Is Meltwater pointed at the right URL?** The UI masks it to `feed.moofer.com/***` and
+2. **Is Meltwater pointed at the right URL?** The UI masks it to `<your-host>/***` and
    can't be edited — delete + re-add only (§c). Verify it against `MELTWATER_WEBHOOK_URL` in
    `.dev.vars`. A host/token change silently orphans the old connection.
 3. **Is anything reaching the Worker?** Check Cloudflare — `npx wrangler tail headwater` (live)

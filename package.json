@@ -12,8 +12,8 @@
     "db:migrate:remote": "wrangler d1 migrations apply headwater --remote",
     "test": "vitest run",
     "gen:icons": "node scripts/gen-media-icons.mjs",
-    "backfill:stations": "curl -fsS -X POST -H \"Authorization: Bearer ${REPLAY_KEY:?set REPLAY_KEY}\" https://feed.moofer.com/admin/backfill-stations",
-    "coalesce:duplicates": "curl -fsS -X POST -H \"Authorization: Bearer ${REPLAY_KEY:?set REPLAY_KEY}\" \"https://feed.moofer.com/admin/coalesce?${ARGS:-dryRun=1}\""
+    "backfill:stations": "curl -fsS -X POST -H \"Authorization: Bearer ${REPLAY_KEY:?set REPLAY_KEY}\" ${HEADWATER_HOST:?set HEADWATER_HOST}/admin/backfill-stations",
+    "coalesce:duplicates": "curl -fsS -X POST -H \"Authorization: Bearer ${REPLAY_KEY:?set REPLAY_KEY}\" \"${HEADWATER_HOST:?set HEADWATER_HOST}/admin/coalesce?${ARGS:-dryRun=1}\""
   },
   "dependencies": {
     "@cloudflare/puppeteer": "^1.1.0",
