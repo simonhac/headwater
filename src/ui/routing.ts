@@ -8,7 +8,7 @@
  */
 import type { BriefRule } from "@/config/feed.config";
 import type { SlackChannel } from "@/lib/slack/channels";
-import type { Routing } from "@/lib/routing";
+import { isMuted, type Routing } from "@/lib/routing";
 import { escHtml } from "./card";
 
 // Wall-clock in the feed's home timezone (matches stations.ts / inspect.ts / format.ts).
@@ -52,6 +52,9 @@ button:hover { background: #2563eb; }
 .error { padding: 10px 20px; font-size: 13px; background: #dc26261a; color: #b91c1c; border-bottom: 1px solid #8882; }
 .hint { max-width: 1000px; margin-top: 18px; font-size: 12.5px; color: #8a8a8a; }
 .empty { padding: 32px; text-align: center; color: #9a9a9a; }
+.muted-row { color: #b91c1c; font-weight: 600; font-size: 12.5px; }
+@media (prefers-color-scheme: dark) { .muted-row { color: #f87171; } }
+td.pick input.implied { accent-color: #9a9a9a; }
 `;
 
 /** The synthesized brief `resolveBrief` returns for mentions no `matchNames`/keyword rule claims. */
@@ -71,25 +74,32 @@ export interface RoutingPageProps {
   diagnostic?: string;
 }
 
-function briefCell(b: BriefRule, ticked: number, defaultLabel: string): string {
+function briefCell(b: BriefRule, muted: boolean): string {
   const swatch = b.color ? `<span class="swatch" style="background:${escHtml(b.color)}"></span>` : "";
   const names = (b.matchNames ?? []).map((n) => escHtml(n)).join(", ");
   const matches = names ? `<div class="muted mono">${names}</div>` : "";
-  // Name the channel rather than saying "default channel": an unticked row still posts, and the
-  // bare phrase reads like "this brief goes nowhere".
-  const fallback = ticked === 0 ? `<div class="muted">↳ posts to ${escHtml(defaultLabel)}</div>` : "";
-  return `<td>${swatch}<span class="brief">${escHtml(b.label)}</span>${matches}${fallback}</td>`;
+  // A muted brief is the one state you can reach by accident, so call it out rather than leaving
+  // an empty row to be read as "not configured yet".
+  const warn = muted ? `<div class="muted-row">⚠ not posted anywhere</div>` : "";
+  return `<td>${swatch}<span class="brief">${escHtml(b.label)}</span>${matches}${warn}</td>`;
 }
 
-function row(b: BriefRule, channels: SlackChannel[], routing: Routing, defaultLabel: string): string {
-  const on = new Set(routing.briefs[b.id] ?? []);
+function row(b: BriefRule, channels: SlackChannel[], routing: Routing, defaultChannel: string): string {
+  const configured = routing.briefs[b.id];
+  // An unconfigured brief posts to the default channel, so SHOW that: tick the default column.
+  // Ticks then mean exactly one thing everywhere on the page — "this channel receives this brief".
+  const on = new Set(configured ?? [defaultChannel]);
+  const implied = configured === undefined;
   const picks = channels
-    .map(
-      (c) =>
-        `<td class="pick"><input type="checkbox" name="r.${escHtml(b.id)}" value="${escHtml(c.id)}"${on.has(c.id) ? " checked" : ""} aria-label="${escHtml(b.label)} → ${escHtml(c.name)}"></td>`,
-    )
+    .map((c) => {
+      const checked = on.has(c.id);
+      // The implied default tick is greyed: it's the current state, but it was inherited rather
+      // than chosen, and saving the form makes it explicit.
+      const cls = checked && implied ? ' class="implied"' : "";
+      return `<td class="pick"><input type="checkbox"${cls} name="r.${escHtml(b.id)}" value="${escHtml(c.id)}"${checked ? " checked" : ""} aria-label="${escHtml(b.label)} → ${escHtml(c.name)}"></td>`;
+    })
     .join("");
-  return `<tr>${briefCell(b, on.size, defaultLabel)}${picks}</tr>`;
+  return `<tr>${briefCell(b, isMuted(b.id, routing))}${picks}</tr>`;
 }
 
 export function renderRoutingPage(p: RoutingPageProps): string {
@@ -103,7 +113,7 @@ export function renderRoutingPage(p: RoutingPageProps): string {
   const defaultName = p.channels.find((c) => c.id === p.defaultChannel)?.name;
   const defaultLabel = defaultName ? `#${defaultName}` : "the default channel";
   const body = p.channels.length
-    ? rows.map((b) => row(b, p.channels, p.routing, defaultLabel)).join("")
+    ? rows.map((b) => row(b, p.channels, p.routing, p.defaultChannel)).join("")
     : `<tr><td class="empty">No channels found — the bot isn't a member of any channel yet.</td></tr>`;
   const saved = p.routing.updatedAt ? `Saved ${escHtml(FMT.format(new Date(p.routing.updatedAt)))}` : "Never saved";
 
@@ -125,9 +135,10 @@ ${p.error ? `<div class="error">${escHtml(p.error)}</div>` : ""}
 </table>
 <div class="actions"><button type="submit">Save routing</button><span class="muted">${saved}</span></div>
 </form>
-<p class="hint">Nothing is ever dropped for want of a tick: a brief with no channel selected still
-posts, to ${escHtml(defaultLabel)}. Tick a channel only to send that brief somewhere else (or somewhere
-<em>as well</em>). The same headline routed to two channels is two separate cards — they never fold into one.</p>
+<p class="hint">A tick means that channel receives that brief — that's the whole rule. Greyed ticks are
+briefs that have never been routed: they post to ${escHtml(defaultLabel)} by default, and saving makes
+that explicit. Untick every box in a row and the brief posts <strong>nowhere</strong>. The same headline
+routed to two channels is two separate cards — they never fold into one.</p>
 <p class="hint">Don't see a channel? <span class="mono">/invite @headwater</span> in it, then ↻ refresh.</p>
 ${p.diagnostic ? `<p class="hint mono">${escHtml(p.diagnostic)}</p>` : ""}
 </main>

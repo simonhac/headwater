@@ -6,8 +6,9 @@
  * edited from `/inspect/routing` without a redeploy, and channel ids are treated like
  * `SLACK_DEFAULT_CHANNEL` (a secret) so they never land in this public repo.
  *
- * A brief with no entry — or an entry that is empty after validation — falls back to
- * `SLACK_DEFAULT_CHANNEL`, so an empty `routing` reproduces the pre-fanout behaviour exactly.
+ * A brief with no entry falls back to `SLACK_DEFAULT_CHANNEL`, so an empty `routing` reproduces the
+ * pre-fanout behaviour exactly. A brief whose entry is present but empty is explicitly MUTED — see
+ * `Routing.briefs`.
  */
 import type { Env } from "@/env";
 import { OpsState } from "@/lib/store/opsState";
@@ -16,7 +17,15 @@ export const ROUTING_KEY = "routing";
 
 export interface Routing {
   v: 1;
-  /** briefId → channel ids. The unmatched/synthesized brief is routable under the id `default`. */
+  /**
+   * briefId → channel ids. The unmatched/synthesized brief is routable under the id `default`.
+   *
+   * The absent-vs-empty distinction is load-bearing:
+   *   - key ABSENT  ⇒ never configured ⇒ posts to `SLACK_DEFAULT_CHANNEL`.
+   *   - key present, EMPTY array ⇒ explicitly muted ⇒ posts nowhere.
+   * That's what lets a never-saved routing reproduce the pre-fanout behaviour while still letting
+   * the admin page switch a brief off by unticking every box.
+   */
   briefs: Record<string, string[]>;
   /** Epoch ms of the last save (0 when never saved). */
   updatedAt: number;
@@ -63,11 +72,22 @@ export async function saveRouting(db: D1Database, routing: Routing, now: number)
   await new OpsState(db).set(ROUTING_KEY, JSON.stringify(next), now);
 }
 
-/** The channels a brief posts to: its routed list, or the default channel when it has none. */
+/**
+ * The channels a brief posts to. An unconfigured brief falls back to the default channel; a brief
+ * configured with an empty list is muted and returns no channels at all (the caller must record
+ * that as a drop, not post it somewhere "safe" — silently reinstating the default would make the
+ * admin page's unticked row a lie).
+ */
 export function channelsFor(briefId: string, routing: Routing, env: Env): string[] {
-  const routed = clean(routing.briefs[briefId] ?? []);
-  if (routed.length) return routed;
-  return clean([env.SLACK_DEFAULT_CHANNEL ?? ""]);
+  const routed = routing.briefs[briefId];
+  if (routed === undefined) return clean([env.SLACK_DEFAULT_CHANNEL ?? ""]);
+  return clean(routed);
+}
+
+/** True when the brief has been explicitly configured to post nowhere. */
+export function isMuted(briefId: string, routing: Routing): boolean {
+  const routed = routing.briefs[briefId];
+  return routed !== undefined && clean(routed).length === 0;
 }
 
 /** Every channel the Worker may have posted into — default first, then every routed channel.
@@ -81,6 +101,10 @@ export function configuredChannels(routing: Routing, env: Env): string[] {
  * with the channel id as the value, so Hono's `parseBody({ all: true })` yields a string for a
  * single tick and an array for several. Unknown brief ids and channel ids not in the live Slack
  * list are dropped, so a stale open tab can't write junk (or a channel the bot has since left).
+ *
+ * Every rendered brief gets an entry, INCLUDING an empty one — the form shows every brief, so a
+ * row with no ticks is a deliberate "post nowhere", not an omission. (Contrast a brief absent from
+ * the map entirely, which means "never configured" and still falls back to the default channel.)
  * `updatedAt` is stamped by `saveRouting`.
  */
 export function parseRoutingForm(
@@ -95,7 +119,7 @@ export function parseRoutingForm(
     const chans = clean(values.filter((v): v is string => typeof v === "string")).filter((c) =>
       allowedChannelIds.includes(c),
     );
-    if (chans.length) briefs[id] = chans;
+    briefs[id] = chans;
   }
   return { v: 1, briefs, updatedAt: 0 };
 }

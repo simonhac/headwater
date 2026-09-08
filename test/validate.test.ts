@@ -95,3 +95,30 @@ describe("validateConfig", () => {
     expect(serialized).not.toContain(secret);
   });
 });
+
+describe("validateConfig — muted briefs", () => {
+  const base = { WEBHOOK_SHARED_SECRET: "x".repeat(20), REPLAY_KEY: "y".repeat(20), SLACK_BOT_TOKEN: `xoxb-${"z".repeat(24)}`, SLACK_DEFAULT_CHANNEL: "C0123ABCD", POSTING_ENABLED: "true" } as unknown as Env;
+
+  it("warns (never errors) when a brief is routed to no channel at all", () => {
+    // Muting is legitimate, but its symptom is a silent channel — indistinguishable from a dead
+    // feed — so it must be visible on /health rather than discovered by absence.
+    const checks = validateConfig(base, { v: 1, briefs: { mps: [], teals: ["C0123ABCD"] }, updatedAt: 1 });
+    const muted = checks.find((c) => c.name === "routing.muted");
+    expect(muted).toMatchObject({ ok: false, severity: "warn" });
+    expect(muted?.detail).toContain("mps");
+    expect(muted?.detail).not.toContain("teals");
+    expect(summarizeConfig(checks).ok).toBe(true); // a warn must not fail configOk
+  });
+
+  it("says nothing when no brief is muted", () => {
+    const checks = validateConfig(base, { v: 1, briefs: { mps: ["C0123ABCD"] }, updatedAt: 1 });
+    expect(checks.find((c) => c.name === "routing.muted")).toBeUndefined();
+  });
+
+  it("never echoes a routed channel id into the detail", () => {
+    // Distinct from the SLACK_DEFAULT_CHANNEL check's static "e.g. C0123ABCD" help text, so this
+    // asserts a real leak rather than colliding with an example string.
+    const checks = validateConfig(base, { v: 1, briefs: { mps: [], teals: ["C9SECRET1"] }, updatedAt: 1 });
+    for (const c of checks) expect(c.detail ?? "").not.toContain("C9SECRET1");
+  });
+});

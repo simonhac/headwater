@@ -87,6 +87,18 @@ export function validateConfig(env: Env, routing?: Routing): ConfigCheck[] {
       severity: "error",
       detail: badChannels.length ? `malformed channel id for brief(s): ${badChannels.join(", ")}` : undefined,
     });
+    // A muted brief posts nowhere. That's a legitimate setting, but it's also the one state you can
+    // reach with a stray click, and its symptom (a quiet channel) looks exactly like a dead feed —
+    // so surface it on /health rather than leaving it to be discovered.
+    const mutedBriefs = entries.filter(([, chans]) => chans.length === 0).map(([id]) => id);
+    if (mutedBriefs.length) {
+      checks.push({
+        name: "routing.muted",
+        ok: false,
+        severity: "warn",
+        detail: `brief(s) routed to no channel, so they post nowhere: ${mutedBriefs.join(", ")}`,
+      });
+    }
     if (staleBriefs.length) {
       checks.push({
         name: "routing.briefs",

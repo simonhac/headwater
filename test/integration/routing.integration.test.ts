@@ -6,7 +6,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import worker from "@/index";
-import { loadRouting } from "@/lib/routing";
+import { channelsFor, loadRouting } from "@/lib/routing";
 import { processEvent } from "@/lib/process";
 import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
@@ -110,11 +110,21 @@ describe("/inspect/routing", () => {
     expect(wrongMethodCalls).toEqual([]);
   });
 
-  it("names the fallback channel on unticked rows, rather than saying 'default channel'", async () => {
-    // An unticked brief still posts; "→ default channel" read as "this brief goes nowhere".
+  it("pre-ticks the default column for a never-routed brief, so a tick always means 'receives'", async () => {
+    // The page used to leave every box empty and explain the fallback in prose; the boxes now show
+    // the actual state. `implied` greys the inherited tick apart from a chosen one.
     const html = await (await call("/inspect/routing")).text();
-    expect(html).toContain("↳ posts to #media-monitoring");
+    expect(html).toContain(`class="implied" name="r.mps" value="${DEFAULT_CH}" checked`);
+    expect(html).not.toContain(`name="r.mps" value="${VIC_CH}" checked`);
     expect(html).not.toContain("→ default channel");
+  });
+
+  it("flags a muted brief instead of leaving the row silently blank", async () => {
+    await call("/inspect/routing", form([["r.mps", DEFAULT_CH]])); // everything else unticked ⇒ muted
+    const html = await (await call("/inspect/routing")).text();
+    expect(html).toContain("⚠ not posted anywhere");
+    // ...and the muted brief really does post nowhere.
+    expect(channelsFor("teals", await loadRouting(env.DB), env)).toEqual([]);
   });
 
   it("renders a column per member channel, following the cursor", async () => {
@@ -143,7 +153,10 @@ describe("/inspect/routing", () => {
     );
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/inspect/routing?saved=1");
-    expect((await loadRouting(env.DB)).briefs).toEqual({ "vic-election-2026": [DEFAULT_CH, VIC_CH] });
+    // Every rendered brief is recorded; the untouched ones are now explicitly muted.
+    const saved = (await loadRouting(env.DB)).briefs;
+    expect(saved["vic-election-2026"]).toEqual([DEFAULT_CH, VIC_CH]);
+    expect(saved.mps).toEqual([]);
 
     const html = await (await call("/inspect/routing?saved=1")).text();
     expect(html).toContain(`name="r.vic-election-2026" value="${VIC_CH}" checked`);
@@ -152,7 +165,8 @@ describe("/inspect/routing", () => {
 
   it("drops channels the bot isn't in, so a stale tab can't route into one", async () => {
     await call("/inspect/routing", form([["r.mps", "C_NOTAMEMBER"]]));
-    expect((await loadRouting(env.DB)).briefs).toEqual({});
+    // The bogus channel is stripped; the brief is left with an empty (muted) entry, not routed to it.
+    expect((await loadRouting(env.DB)).briefs.mps).toEqual([]);
   });
 
   it("the saved routing takes effect on the very next processEvent", async () => {

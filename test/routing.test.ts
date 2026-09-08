@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { channelsFor, configuredChannels, emptyRouting, loadRouting, parseRoutingForm, type Routing } from "@/lib/routing";
+import { channelsFor, configuredChannels, emptyRouting, isMuted, loadRouting, parseRoutingForm, type Routing } from "@/lib/routing";
 import type { Env } from "@/env";
 
 const env = (dflt?: string) => ({ SLACK_DEFAULT_CHANNEL: dflt }) as unknown as Env;
@@ -10,9 +10,17 @@ const fakeDB = (value: string | null) =>
   ({ prepare: () => ({ bind: () => ({ first: async () => (value === null ? null : { value }) }) }) }) as unknown as D1Database;
 
 describe("channelsFor", () => {
-  it("falls back to the default channel when the brief is unrouted", () => {
+  it("falls back to the default channel when the brief has never been configured", () => {
     expect(channelsFor("mps", emptyRouting(), env("C_DEFAULT"))).toEqual(["C_DEFAULT"]);
-    expect(channelsFor("mps", routing({ mps: [] }), env("C_DEFAULT"))).toEqual(["C_DEFAULT"]);
+  });
+
+  it("posts NOWHERE when the brief is explicitly muted (present but empty)", () => {
+    // Absent vs empty is the whole difference between "not set up yet" and "deliberately off".
+    // Reinstating the default here would make an unticked row on /inspect/routing a lie.
+    expect(channelsFor("mps", routing({ mps: [] }), env("C_DEFAULT"))).toEqual([]);
+    expect(isMuted("mps", routing({ mps: [] }))).toBe(true);
+    expect(isMuted("mps", emptyRouting())).toBe(false);
+    expect(isMuted("mps", routing({ mps: ["C_A"] }))).toBe(false);
   });
 
   it("returns the routed channels, de-duped and blank-free", () => {
@@ -45,25 +53,32 @@ describe("parseRoutingForm", () => {
 
   it("accepts both a single value and an array (parseBody all: true)", () => {
     const r = parseRoutingForm({ "r.mps": "C_A", "r.vic-election-2026": ["C_A", "C_B"] }, briefIds, allowed);
-    expect(r.briefs).toEqual({ mps: ["C_A"], "vic-election-2026": ["C_A", "C_B"] });
+    expect(r.briefs).toEqual({ mps: ["C_A"], "vic-election-2026": ["C_A", "C_B"], default: [] });
   });
 
   it("routes the synthesized 'default' brief like any other", () => {
-    expect(parseRoutingForm({ "r.default": "C_B" }, briefIds, allowed).briefs).toEqual({ default: ["C_B"] });
+    expect(parseRoutingForm({ "r.default": "C_B" }, briefIds, allowed).briefs.default).toEqual(["C_B"]);
   });
 
   it("drops unknown brief ids and channels not in the live Slack list", () => {
     const r = parseRoutingForm({ "r.ghost-brief": "C_A", "r.mps": ["C_A", "C_GONE"] }, briefIds, allowed);
-    expect(r.briefs).toEqual({ mps: ["C_A"] });
+    expect(r.briefs["ghost-brief"]).toBeUndefined();
+    expect(r.briefs.mps).toEqual(["C_A"]);
   });
 
-  it("omits briefs with nothing ticked, so they fall back to the default", () => {
-    expect(parseRoutingForm({ "r.mps": [] }, briefIds, allowed).briefs).toEqual({});
-    expect(parseRoutingForm({}, briefIds, allowed).briefs).toEqual({});
+  it("records an EMPTY entry for a rendered brief with nothing ticked — that is a mute", () => {
+    // The form renders every brief, so "no ticks" is a deliberate choice, not an omission. Writing
+    // nothing here would silently reinstate the default channel and make the mute un-expressible.
+    expect(parseRoutingForm({ "r.mps": [] }, briefIds, allowed).briefs).toEqual({
+      mps: [],
+      "vic-election-2026": [],
+      default: [],
+    });
+    expect(parseRoutingForm({}, briefIds, allowed).briefs.mps).toEqual([]);
   });
 
   it("ignores non-string values", () => {
-    expect(parseRoutingForm({ "r.mps": [new File([], "x"), "C_A"] }, briefIds, allowed).briefs).toEqual({ mps: ["C_A"] });
+    expect(parseRoutingForm({ "r.mps": [new File([], "x"), "C_A"] }, briefIds, allowed).briefs.mps).toEqual(["C_A"]);
   });
 });
 

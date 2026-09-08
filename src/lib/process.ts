@@ -203,8 +203,23 @@ export async function processEvent(
     // for any clip whose station never resolved, exhausting the daily budget.
     if (broadcast && !mention.url) await resolveBroadcastOutlet(env, mention, now);
 
-    // Where this brief posts: its routed channels, or the default channel when unrouted.
+    // Where this brief posts: its routed channels, or the default channel when unrouted. Empty
+    // means the brief was explicitly muted on /inspect/routing.
     const channels = channelsFor(brief.id, routing, env);
+    if (channels.length === 0) {
+      // Record it rather than dropping it on the floor: a muted brief must still be visible in
+      // /inspect (and countable as `dropped`), or a mis-tick looks identical to a dead feed.
+      dropped.push({ mention, reason: "muted: no channel routed for this brief" });
+      results.push({
+        title: mention.title,
+        source: mention.sourceName,
+        url: mention.url,
+        brief: brief.label,
+        decision: "dropped",
+        reason: "muted: no channel routed for this brief",
+      });
+      continue;
+    }
 
     // Brief- AND channel-scoped so the SAME article matched by a DIFFERENT brief — or destined for a
     // DIFFERENT channel — isn't silently dropped as a duplicate. A same-brief repeat flows into the
