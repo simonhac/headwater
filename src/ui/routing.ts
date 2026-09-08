@@ -37,7 +37,7 @@ main { padding: 12px 20px 48px; }
 table { border-collapse: collapse; max-width: 1000px; }
 th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #8882; }
 th { background: var(--bg); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: #8a8a8a; }
-th.ch { text-align: center; white-space: nowrap; text-transform: none; font-size: 12.5px; letter-spacing: 0; color: inherit; }
+th.ch { text-align: center; vertical-align: top; white-space: nowrap; text-transform: none; font-size: 12.5px; letter-spacing: 0; color: inherit; }
 th.ch .tag { display: block; text-transform: uppercase; font-size: 10px; letter-spacing: .04em; color: #8a8a8a; font-weight: 600; }
 td.pick { text-align: center; }
 td.pick input { width: 16px; height: 16px; cursor: pointer; }
@@ -71,19 +71,17 @@ export interface RoutingPageProps {
   diagnostic?: string;
 }
 
-function briefCell(b: BriefRule, ticked: number): string {
+function briefCell(b: BriefRule, ticked: number, defaultLabel: string): string {
   const swatch = b.color ? `<span class="swatch" style="background:${escHtml(b.color)}"></span>` : "";
   const names = (b.matchNames ?? []).map((n) => escHtml(n)).join(", ");
-  const sub =
-    ticked === 0
-      ? `<div class="muted">→ default channel</div>`
-      : names
-        ? `<div class="muted mono">${names}</div>`
-        : "";
-  return `<td>${swatch}<span class="brief">${escHtml(b.label)}</span>${sub}</td>`;
+  const matches = names ? `<div class="muted mono">${names}</div>` : "";
+  // Name the channel rather than saying "default channel": an unticked row still posts, and the
+  // bare phrase reads like "this brief goes nowhere".
+  const fallback = ticked === 0 ? `<div class="muted">↳ posts to ${escHtml(defaultLabel)}</div>` : "";
+  return `<td>${swatch}<span class="brief">${escHtml(b.label)}</span>${matches}${fallback}</td>`;
 }
 
-function row(b: BriefRule, channels: SlackChannel[], routing: Routing): string {
+function row(b: BriefRule, channels: SlackChannel[], routing: Routing, defaultLabel: string): string {
   const on = new Set(routing.briefs[b.id] ?? []);
   const picks = channels
     .map(
@@ -91,7 +89,7 @@ function row(b: BriefRule, channels: SlackChannel[], routing: Routing): string {
         `<td class="pick"><input type="checkbox" name="r.${escHtml(b.id)}" value="${escHtml(c.id)}"${on.has(c.id) ? " checked" : ""} aria-label="${escHtml(b.label)} → ${escHtml(c.name)}"></td>`,
     )
     .join("");
-  return `<tr>${briefCell(b, on.size)}${picks}</tr>`;
+  return `<tr>${briefCell(b, on.size, defaultLabel)}${picks}</tr>`;
 }
 
 export function renderRoutingPage(p: RoutingPageProps): string {
@@ -102,8 +100,10 @@ export function renderRoutingPage(p: RoutingPageProps): string {
         `<th class="ch">${c.isPrivate ? "🔒 " : ""}#${escHtml(c.name)}${c.id === p.defaultChannel ? `<span class="tag">default</span>` : ""}</th>`,
     )
     .join("");
+  const defaultName = p.channels.find((c) => c.id === p.defaultChannel)?.name;
+  const defaultLabel = defaultName ? `#${defaultName}` : "the default channel";
   const body = p.channels.length
-    ? rows.map((b) => row(b, p.channels, p.routing)).join("")
+    ? rows.map((b) => row(b, p.channels, p.routing, defaultLabel)).join("")
     : `<tr><td class="empty">No channels found — the bot isn't a member of any channel yet.</td></tr>`;
   const saved = p.routing.updatedAt ? `Saved ${escHtml(FMT.format(new Date(p.routing.updatedAt)))}` : "Never saved";
 
@@ -125,8 +125,9 @@ ${p.error ? `<div class="error">${escHtml(p.error)}</div>` : ""}
 </table>
 <div class="actions"><button type="submit">Save routing</button><span class="muted">${saved}</span></div>
 </form>
-<p class="hint">A brief with nothing ticked posts to the default channel. The same headline routed to
-two channels is two separate cards — they never fold into one.</p>
+<p class="hint">Nothing is ever dropped for want of a tick: a brief with no channel selected still
+posts, to ${escHtml(defaultLabel)}. Tick a channel only to send that brief somewhere else (or somewhere
+<em>as well</em>). The same headline routed to two channels is two separate cards — they never fold into one.</p>
 <p class="hint">Don't see a channel? <span class="mono">/invite @headwater</span> in it, then ↻ refresh.</p>
 ${p.diagnostic ? `<p class="hint mono">${escHtml(p.diagnostic)}</p>` : ""}
 </main>

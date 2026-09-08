@@ -110,6 +110,13 @@ describe("/inspect/routing", () => {
     expect(wrongMethodCalls).toEqual([]);
   });
 
+  it("names the fallback channel on unticked rows, rather than saying 'default channel'", async () => {
+    // An unticked brief still posts; "→ default channel" read as "this brief goes nowhere".
+    const html = await (await call("/inspect/routing")).text();
+    expect(html).toContain("↳ posts to #media-monitoring");
+    expect(html).not.toContain("→ default channel");
+  });
+
   it("renders a column per member channel, following the cursor", async () => {
     const html = await (await call("/inspect/routing")).text();
     expect(html).toContain("#media-monitoring<");
