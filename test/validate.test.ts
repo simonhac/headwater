@@ -10,6 +10,7 @@ const GOOD: Partial<Env> = {
   REPLAY_KEY: "replay_test_key_000000000000000000000",
   SLACK_BOT_TOKEN: "xoxb-fake-not-a-real-bot-token-000000",
   SLACK_DEFAULT_CHANNEL: "C0TEST000AA",
+  SLACK_SIGNING_SECRET: "0123456789abcdef0123456789abcdef",
   POSTING_ENABLED: "true",
 };
 

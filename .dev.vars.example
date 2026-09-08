@@ -11,6 +11,15 @@ REPLAY_KEY=dev-replay-change-me
 SLACK_BOT_TOKEN=
 # Slack channel id (e.g. C0123ABCD) — right-click the channel → Copy link → the C0… id. Or #channel-name.
 SLACK_DEFAULT_CHANNEL=
+# Slack app Signing Secret — Slack app → Basic Information → App Credentials. Verifies the /digest slash
+# command (POST /slack/commands). Blank = the command endpoint answers 503.
+SLACK_SIGNING_SECRET=
+
+# Daily digest email (Resend). RESEND_API_KEY from resend.com → API Keys; DIGEST_FROM on a Resend-verified
+# domain. Recipients are NOT env — they subscribe from Slack with `/digest subscribe [time]`.
+DIGEST_ENABLED=false
+RESEND_API_KEY=
+DIGEST_FROM=
 
 # Cloudflare Access (identifiers, NOT secrets — they appear in Access's public login redirect). Used to
 # verify the Access JWT on /inspect + /api. From Cloudflare Zero Trust:

@@ -61,13 +61,12 @@
   "triggers": {
     // Two scheduled jobs (dispatched by controller.cron in scheduled(), src/index.ts):
     // - "*/15 * * * *" — self-healing reconcile: re-run the recent archive window so un-posted
-    //   stragglers re-post (seen-aware, so everything already delivered is skipped).
+    //   stragglers re-post (seen-aware, so everything already delivered is skipped). The same tick
+    //   runs the daily digest send: each subscriber picks a local time in 15-minute steps from Slack
+    //   (/digest subscribe 7:30), and src/lib/digestSend.ts gates on their own zone's clock — a UTC
+    //   quarter-hour cron covers every slot in every zone, so daylight saving needs no special-casing.
     // - "0 * * * *" — hourly ingestion heartbeat: alert Slack if Meltwater webhooks go quiet
     //   (src/lib/heartbeat.ts).
-    // - "0 21 * * *" + "0 22 * * *" — daily digest email. Cron fires on UTC, but the send is pinned
-    //   to 8am Melbourne, which is UTC+11 over daylight saving and UTC+10 otherwise. Registering BOTH
-    //   candidate hours and gating in code (src/lib/digestSend.ts) keeps the send at 8am local
-    //   year-round; exactly one of the two passes the gate on any given day.
-    "crons": ["*/15 * * * *", "0 * * * *", "0 21 * * *", "0 22 * * *"]
+    "crons": ["*/15 * * * *", "0 * * * *"]
   }
 }

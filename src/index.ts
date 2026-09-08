@@ -29,6 +29,9 @@ import { MEDIA_ICON_PNG } from "@/assets/mediaIcons";
 import { buildDigest, DIGEST_TZ } from "@/lib/digest";
 import { renderDigestEmail, renderDigestText } from "@/ui/email";
 import { runDigestSend } from "@/lib/digestSend";
+import { SubscriberStore } from "@/lib/store/subscribers";
+import { verifySlackSignature } from "@/lib/slack/verify";
+import { handleDigestCommand } from "@/lib/slack/commands";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -94,6 +97,7 @@ async function heal(env: Env): Promise<void> {
 // --- health / status (no secrets leaked). Root "/" falls through to 404. ---
 app.get("/health", async (c) => {
   let count = 0;
+  let subscribers = 0;
   // Drift gauge over the last DRIFT_WINDOW_MS: `errors` = failed/threw events, `unposted` =
   // archived-but-never-delivered. Non-zero counts that don't drain across reconcile ticks = drift.
   let drift: { errors: number; unposted: number } | null = null;
@@ -102,6 +106,7 @@ app.get("/health", async (c) => {
     const row = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM webhook_events`).first<{ n: number }>();
     count = row?.n ?? 0;
     drift = await log.driftCounts(Date.now() - DRIFT_WINDOW_MS);
+    subscribers = await new SubscriberStore(c.env.DB).count();
   } catch {
     /* DB not migrated yet */
   }
@@ -114,6 +119,7 @@ app.get("/health", async (c) => {
     build: "headwater-25", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     digestEnabled: c.env.DIGEST_ENABLED === "true",
+    digestSubscribers: subscribers, // count only — addresses stay in D1
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
     configOk: config.ok,
@@ -122,8 +128,9 @@ app.get("/health", async (c) => {
       slackToken: !!c.env.SLACK_BOT_TOKEN,
       slackChannel: !!c.env.SLACK_DEFAULT_CHANNEL,
       accessConfigured: !!c.env.ACCESS_TEAM_DOMAIN && !!c.env.ACCESS_AUD,
-      // Booleans only — never the account id, token, or recipient list.
-      digestMailer: !!c.env.RESEND_API_KEY && !!c.env.DIGEST_FROM && !!c.env.DIGEST_TO,
+      // Booleans only — never the key or the From address.
+      digestMailer: !!c.env.RESEND_API_KEY && !!c.env.DIGEST_FROM,
+      slackSigningSecret: !!c.env.SLACK_SIGNING_SECRET,
     },
     // How many distinct channels the feed fans out to (count only — ids are secret). 1 = default only.
     channels: configuredChannels(routing, c.env).length,
@@ -479,11 +486,12 @@ app.get("/digest", async (c) => {
 });
 
 /**
- * Admin: run the daily digest send on demand — the same code path the cron uses. Gated by REPLAY_KEY
+ * Admin: run the digest send on demand — the same code path the cron uses. Gated by REPLAY_KEY
  * like the other /admin routes.
  *
- *   ?dryRun=1   build and render, report the story count, send NOTHING (ignores DIGEST_ENABLED)
- *   ?force=1    bypass the 8am-Melbourne hour gate for a real send
+ *   ?dryRun=1   build and render, report who is due and the story count, send NOTHING
+ *               (ignores DIGEST_ENABLED)
+ *   ?force=1    bypass every subscriber's time-of-day gate for a real send
  *
  * `force` deliberately does NOT bypass the already-sent-today guard — testing must never be able to
  * double-send a real digest to a real inbox.
@@ -497,44 +505,77 @@ app.post("/admin/digest-send", async (c) => {
   return c.json(await runDigestSend(c.env, Date.now(), { dryRun, force }));
 });
 
+/** Admin: the digest subscriber list (addresses included — this is the one place they surface). */
+app.get("/admin/digest-subscribers", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  return c.json({ subscribers: await new SubscriberStore(c.env.DB).all() });
+});
+
+/**
+ * Slack slash command endpoint (`/digest …`; src/lib/slack/commands.ts). Slack POSTs a form body and
+ * signs it with the app's Signing Secret; the signature is verified over the RAW body before anything
+ * is parsed, and the reply is an ephemeral message only the invoking user sees. Slack times out after
+ * 3s, so the handler does one users.info call and one D1 write — no deferred response_url work.
+ */
+app.post("/slack/commands", async (c) => {
+  if (!c.env.SLACK_SIGNING_SECRET) return c.text("SLACK_SIGNING_SECRET not configured", 503);
+  const rawBody = await c.req.text();
+  const ok = await verifySlackSignature({
+    signingSecret: c.env.SLACK_SIGNING_SECRET,
+    timestamp: c.req.header("x-slack-request-timestamp"),
+    signature: c.req.header("x-slack-signature"),
+    rawBody,
+    nowMs: Date.now(),
+  });
+  if (!ok) return c.text("bad signature", 401);
+
+  const form = new URLSearchParams(rawBody);
+  const userId = form.get("user_id") ?? "";
+  if (!userId) return c.text("missing user_id", 400);
+  const reply = await handleDigestCommand(c.env, { userId, text: form.get("text") ?? "", nowMs: Date.now() });
+  return c.json({ response_type: "ephemeral", text: reply.text });
+});
+
 // Cron Triggers (wrangler.jsonc `triggers.crons`), dispatched by controller.cron:
-//   "*/15 * * * *"          → self-healing reconcile
-//   "0 * * * *"             → hourly ingestion heartbeat + card healer
-//   "0 21 * * *" / "0 22 * * *" → daily digest email; the two candidate UTC hours for 8am Melbourne
-//                             (AEDT/AEST). runDigestSend's own gate lets exactly one through, so
-//                             the send doesn't drift by an hour across daylight saving.
-// (At the top of the hour several fire — Cloudflare invokes scheduled() once per matching cron.)
+//   "*/15 * * * *"  → self-healing reconcile + the per-subscriber digest send (each subscriber picks a
+//                     local time in 15-minute steps; src/lib/digestSend.ts gates on their own clock)
+//   "0 * * * *"     → hourly ingestion heartbeat + card healer
+// (At the top of the hour both fire — Cloudflare invokes scheduled() once per matching cron.)
 // Never throw out of scheduled() — a rejected cron just retries noisily; each job self-reports.
 export { StationRenderer } from "@/do/stationRenderer";
-
-/** The two UTC hours that can be 8am in Melbourne, depending on daylight saving. */
-const DIGEST_CRONS = new Set(["0 21 * * *", "0 22 * * *"]);
 
 export default {
   fetch: app.fetch,
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    if (DIGEST_CRONS.has(controller.cron)) {
-      ctx.waitUntil(
-        runDigestSend(env, Date.now())
-          .then((r) => {
-            // Only log the runs that did something; a skipped wrong-hour tick is pure noise.
-            if (r.sent || r.error || r.empty) {
-              console.warn(`[digest] day=${r.day} stories=${r.storyCount} sent=${r.sent}${r.empty ? " empty=1" : ""}${r.error ? ` error=${r.error}` : ""}`);
-            }
-          })
-          .catch((e) => console.error(`[digest] failed: ${String(e)}`)),
-      );
-    } else if (controller.cron === "0 * * * *") {
+    if (controller.cron === "0 * * * *") {
       ctx.waitUntil(runHeartbeat(env, Date.now()).catch(() => {}));
       ctx.waitUntil(heal(env).catch((e) => console.error(`[heal] failed: ${String(e)}`)));
     } else {
-      // Reconcile, THEN backstop the drainer (in case an enqueue's poke was lost). One waitUntil so
-      // both run to completion within the request — poke on an empty queue is a no-op (no stray alarm).
+      // Reconcile, THEN backstop the drainer (in case an enqueue's poke was lost), THEN the digest
+      // send — so anyone due this tick gets a window that includes what reconcile just healed. One
+      // waitUntil so all run to completion within the request — poke on an empty queue is a no-op
+      // (no stray alarm), and the digest returns immediately when nobody is due.
       ctx.waitUntil(
         reconcile(env)
           .catch((e) => console.error(`[reconcile] failed: ${String(e)}`))
           .then(() => pokeStationRender(env))
-          .catch(() => {}),
+          .catch(() => {})
+          .then(() => runDigestSend(env, Date.now()))
+          .then((r) => {
+            // Only log the runs that did something; a tick where nobody is due is pure noise.
+            if (r.sent || r.failed || r.error || r.empty) {
+              const failures = r.results
+                .filter((x) => x.status === "failed")
+                .map((x) => `${x.userId}:${x.error}`)
+                .join(",");
+              console.warn(
+                `[digest] due=${r.due} stories=${r.storyCount} sent=${r.sent} failed=${r.failed}${r.empty ? " empty=1" : ""}${r.error ? ` error=${r.error}` : ""}${failures ? ` failures=${failures}` : ""}`,
+              );
+            }
+          })
+          .catch((e) => console.error(`[digest] failed: ${String(e)}`)),
       );
     }
   },

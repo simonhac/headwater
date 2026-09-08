@@ -25,7 +25,6 @@ export interface MailerConfig {
   fromAddress: string;
   fromName: string;
   replyTo?: string;
-  to: string[];
 }
 
 export interface MailResult {
@@ -43,27 +42,14 @@ export function mailerConfig(env: Env): MailerConfig | { error: string } {
   const missing: string[] = [];
   if (!env.RESEND_API_KEY) missing.push("RESEND_API_KEY");
   if (!env.DIGEST_FROM) missing.push("DIGEST_FROM");
-  if (!env.DIGEST_TO) missing.push("DIGEST_TO");
   if (missing.length) return { error: `missing: ${missing.join(", ")}` };
-
-  const to = splitAddresses(env.DIGEST_TO!);
-  if (!to.length) return { error: "DIGEST_TO has no valid addresses" };
 
   return {
     apiKey: env.RESEND_API_KEY!,
     fromAddress: env.DIGEST_FROM!,
     fromName: env.DIGEST_FROM_NAME ?? "Headwater",
     replyTo: env.DIGEST_REPLY_TO,
-    to,
   };
-}
-
-/** Comma/whitespace-separated recipient list → trimmed, non-empty addresses. */
-export function splitAddresses(raw: string): string[] {
-  return raw
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.includes("@"));
 }
 
 /**
@@ -77,6 +63,8 @@ export function formatFrom(name: string, address: string): string {
 }
 
 export interface OutboundEmail {
+  /** Recipients (one per digest subscriber; the list comes from D1, not env). */
+  to: string[];
   subject: string;
   html: string;
   text: string;
@@ -92,7 +80,7 @@ export interface OutboundEmail {
 export async function sendEmail(cfg: MailerConfig, msg: OutboundEmail): Promise<MailResult> {
   const body = {
     from: formatFrom(cfg.fromName, cfg.fromAddress),
-    to: cfg.to,
+    to: msg.to,
     ...(cfg.replyTo ? { reply_to: cfg.replyTo } : {}),
     subject: msg.subject,
     html: msg.html,

@@ -38,6 +38,9 @@ export interface Env {
   SLACK_BOT_TOKEN?: string;
   /** Default Slack channel id/name for the trial feed */
   SLACK_DEFAULT_CHANNEL?: string;
+  /** Slack app Signing Secret (Basic Information) — verifies inbound slash commands on /slack/commands.
+   * Unset = the route answers 503 and the `/digest` command is unavailable. */
+  SLACK_SIGNING_SECRET?: string;
   /** Bearer token (Authorization: Bearer …) guarding the /admin/* endpoints. */
   REPLAY_KEY?: string;
 
@@ -60,8 +63,6 @@ export interface Env {
   DIGEST_FROM?: string;
   /** Display name for the From header (default "Headwater"). */
   DIGEST_FROM_NAME?: string;
-  /** Recipients, comma- or whitespace-separated. Superseded by a subscription table later. */
-  DIGEST_TO?: string;
   /** Reply-To — set this if the From address isn't a real mailbox, so replies don't bounce. */
   DIGEST_REPLY_TO?: string;
   /** Optional Slack channel link for the digest footer. */

@@ -174,6 +174,7 @@ npx wrangler secret put WEBHOOK_SHARED_SECRET   # webhook path token — generat
 npx wrangler secret put REPLAY_KEY              # bearer token for /admin/* — generate: openssl rand -hex 32
 npx wrangler secret put SLACK_BOT_TOKEN         # xoxb-… — Slack app → OAuth & Permissions (later)
 npx wrangler secret put SLACK_DEFAULT_CHANNEL   # channel id, e.g. C0123ABCD — Slack channel → Copy link
+npx wrangler secret put SLACK_SIGNING_SECRET    # Slack app → Basic Information — enables the /digest slash command
 npx wrangler secret put ACCESS_TEAM_DOMAIN      # https://<team>.cloudflareaccess.com — Zero Trust → Settings
 npx wrangler secret put ACCESS_AUD              # Access → Applications → your app → Application Audience (AUD) Tag
 
@@ -231,10 +232,9 @@ It reports names and reasons only, never values.
 | Name | Kind | Required | Purpose |
 |---|---|---|---|
 | `DIGEST_ENABLED` | var | yes | Strict `"true"` to actually send. Anything else = no mail is ever sent |
-| `DIGEST_CF_ACCOUNT_ID` | secret | yes | Cloudflare account id (32-char hex) owning the onboarded sending domain |
-| `DIGEST_API_TOKEN` | secret | yes | API token scoped to Email Sending on that account |
-| `DIGEST_FROM` | secret | yes | From address on the onboarded domain, e.g. `digest@news.example.org` |
-| `DIGEST_TO` | secret | yes | Recipients, comma- or whitespace-separated |
+| `RESEND_API_KEY` | secret | yes | Resend API key (`re_…`) |
+| `DIGEST_FROM` | secret | yes | From address on a Resend-verified domain, e.g. `digest@news.example.org` |
+| `SLACK_SIGNING_SECRET` | secret | for `/digest` | Slack app Signing Secret; verifies the slash command on `POST /slack/commands` |
 | `DIGEST_FROM_NAME` | var | no (`Headwater`) | Display name on the From header |
 | `DIGEST_REPLY_TO` | var | no | Set this if `DIGEST_FROM` isn't a real mailbox, so replies don't bounce |
 | `DIGEST_SLACK_URL` | var | no | Slack channel link for the digest footer |
@@ -303,16 +303,28 @@ known-correct URL).
 > naming never blocks delivery — it only affects labeling.
 
 ## Wire up Slack
-1. Create a Slack app → add bot scopes `chat:write` (optionally `chat:write.public`) plus
+1. Create a Slack app → add bot scopes `chat:write` (optionally `chat:write.public`),
    `channels:read` and `groups:read` (the channel picker on `/inspect/routing` calls
-   `conversations.list` over public + private channels) → install → copy the `xoxb-…` token.
+   `conversations.list` over public + private channels), plus `users:read` and `users:read.email`
+   (the `/digest` slash command reads the caller's profile email + time zone) → install → copy the
+   `xoxb-…` token.
 2. Create the channel and `/invite` the bot. The picker only offers channels the bot is a member of.
 3. `wrangler secret put SLACK_BOT_TOKEN` and `SLACK_DEFAULT_CHANNEL` (the channel id, e.g. `C0123ABCD`).
 4. Set `"POSTING_ENABLED": "true"` in `wrangler.jsonc` and `pnpm run deploy`.
 
-> Adding `channels:read`/`groups:read` to an already-installed app needs **Reinstall to workspace**
-> (OAuth & Permissions). Until then `/inspect/routing` shows a `missing_scope` notice instead of the
-> channel columns; posting is unaffected.
+> Adding scopes to an already-installed app needs **Reinstall to workspace** (OAuth & Permissions).
+> Until then `/inspect/routing` shows a `missing_scope` notice instead of the channel columns and
+> `/digest subscribe` explains which scope is missing; posting is unaffected.
+
+### The `/digest` slash command
+Users manage their own daily-digest subscription from Slack — see [Daily digest email](#daily-digest-email).
+1. Slack app → **Slash Commands** → Create: command `/digest`, Request URL
+   `https://<your custom host>/slack/commands` (the `workers.dev` URL is disabled — see the
+   operational log in `CLAUDE.md`), usage hint `subscribe [time] | unsubscribe | status`.
+2. Slack app → **Basic Information** → App Credentials → copy the **Signing Secret** →
+   `wrangler secret put SLACK_SIGNING_SECRET`. Every inbound command is HMAC-verified against it
+   (`src/lib/slack/verify.ts`) before the body is parsed; until it is set the route answers 503.
+3. Reinstall the app if you added the `users:read*` scopes in the same change.
 
 ### Routing briefs to channels — `/inspect/routing`
 Each brief fans out to one or more Slack channels. The matrix (rows = briefs, columns = the channels
@@ -375,33 +387,41 @@ posts. `GET /digest` previews it (Access-gated; `?days=7`, `?text=1` for the pla
 markup (nested tables, inline styles) because Gmail and Outlook strip `<style>` blocks and positioned
 pseudo-elements.
 
-**Sending domain.** Email Sending is *account-scoped*: the `from` domain must be onboarded in the same
-account as the token used to send. Because this Worker's account and the sending domain can differ, the
-digest uses the **REST API** (`src/lib/mailer.ts`) rather than the `send_email` binding — the binding
-can only see domains onboarded in the Worker's own account.
+**Delivery.** Mail goes out through **Resend** (`src/lib/mailer.ts`; `RESEND_API_KEY`, `DIGEST_FROM`
+on a Resend-verified domain). Cloudflare Email Sending was ruled out because it needs Workers Paid on
+the account that owns the sending domain, which is not necessarily the account running this Worker.
 
-Onboard a **subdomain** (e.g. `news.example.org`) rather than the apex: the subdomain gets its own
-SPF record, leaving the parent domain's existing SPF/DKIM/MX — i.e. your real corporate mail — untouched.
+**Subscribing — from Slack.** Recipients are not configured in env; each person subscribes themselves
+with the `/digest` slash command (setup: [The `/digest` slash command](#the-digest-slash-command)):
 
-```bash
-# run against the account that owns the zone (dashboard: Compute & AI → Email Service → Email Sending)
-npx wrangler email sending enable news.example.org
-npx wrangler email sending dns get news.example.org   # verify the SPF + DKIM records
-```
-This writes DNS records, so it needs credentials for that account with Email Sending **and** DNS write.
+| Command | Effect |
+|---|---|
+| `/digest subscribe` | Subscribe at **8:00am** in your Slack profile's time zone |
+| `/digest subscribe 7:30` / `6am` / `19:15` | Subscribe (or change the time). Rounded to the nearest 15 minutes |
+| `/digest unsubscribe` | Stop receiving it |
+| `/digest status` (or bare `/digest`) | Show your address, time, zone, last and next send |
 
-**Schedule.** Cron Triggers fire on UTC, but the send is pinned to **8am Melbourne** — UTC+11 over
-daylight saving, UTC+10 otherwise. `wrangler.jsonc` therefore registers *both* candidate hours
-(`0 21 * * *` and `0 22 * * *`) and `src/lib/digestSend.ts` lets exactly one through, so the send never
-drifts by an hour across the DST boundary.
+The address is always the caller's **Slack profile email** (`users.info`), so nobody can point the digest
+at an address they don't own; the zone is the profile's `tz`. Subscriptions live in D1
+(`digest_subscribers`, migration 0012). `GET /admin/digest-subscribers` (bearer `REPLAY_KEY`) lists
+them; `/health` reports the count only.
 
-**Send-once.** The Melbourne calendar day of the last send is recorded in `ops_state`, so a cron retry,
-a manual run, or both cron hours firing can never double-send. The marker is written only *after* the
-mail API accepts the message, so a failed send retries on the next tick.
+**Schedule.** The quarter-hour cron (`*/15 * * * *`) runs `src/lib/digestSend.ts`, which checks every
+subscriber against *their own* zone's clock: due once their local time has passed the chosen slot and
+nothing has gone out on their local day. Because the check is "has passed" rather than "equals", a late
+tick, an outage or a daylight-saving gap delivers late rather than never (subscribing after today's slot
+pre-marks today, so a new subscription never fires immediately). No UTC offset arithmetic anywhere, so
+DST needs no special-casing. All subscribers due on the same tick share one 24-hour story window, and
+the email is rendered once per distinct zone.
+
+**Send-once.** Each subscriber's local calendar day of the last send is recorded on their row, written
+only *after* the mail API accepts the message — so a failed send retries on the next tick and a cron
+retry never double-sends. Resend's `Idempotency-Key` (user + day + slot) backstops the marker.
 
 **Testing.** `POST /admin/digest-send` (`Authorization: Bearer REPLAY_KEY`) runs the same code path:
-- `?dryRun=1` — build and render, report the story count, send **nothing** (ignores `DIGEST_ENABLED`)
-- `?force=1` — bypass the 8am gate for a real send
+- `?dryRun=1` — build and render, report who is due and the story count, send **nothing**
+  (ignores `DIGEST_ENABLED`)
+- `?force=1` — bypass every subscriber's time-of-day gate for a real send
 
 `force` deliberately does **not** bypass the already-sent-today guard: testing must never be able to
 double-send a real digest.
