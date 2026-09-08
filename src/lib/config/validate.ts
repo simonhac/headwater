@@ -65,6 +65,20 @@ export function validateConfig(env: Env, routing?: Routing): ConfigCheck[] {
     detail: ch ? "expected a channel id (e.g. C0123ABCD) or #channel-name" : "missing",
   });
 
+  // Slack Signing Secret: without it the `/digest` slash command endpoint answers 503. Advisory only —
+  // the feed itself never needs it.
+  const signing = env.SLACK_SIGNING_SECRET;
+  checks.push({
+    name: "SLACK_SIGNING_SECRET",
+    ok: !!signing && /^[0-9a-f]{32}$/.test(signing),
+    severity: "warn",
+    detail: !signing
+      ? "missing — the /digest slash command is unavailable until set"
+      : /^[0-9a-f]{32}$/.test(signing)
+        ? undefined
+        : "expected the 32-hex-char Signing Secret from the Slack app's Basic Information page",
+  });
+
   // POSTING_ENABLED gate is a strict `=== "true"`, so anything else silently pauses posting.
   const pe = env.POSTING_ENABLED;
   checks.push({
@@ -139,7 +153,7 @@ function digestChecks(env: Env): ConfigCheck[] {
   ];
 
   // Below here: only worth reporting once someone has started configuring the digest.
-  if (!on && !env.RESEND_API_KEY && !env.DIGEST_FROM && !env.DIGEST_TO) return checks;
+  if (!on && !env.RESEND_API_KEY && !env.DIGEST_FROM) return checks;
 
   // Resend keys are `re_…`. The common mistakes are pasting a Cloudflare token or a dashboard URL.
   const key = env.RESEND_API_KEY;
@@ -166,14 +180,7 @@ function digestChecks(env: Env): ConfigCheck[] {
     detail: !from ? "missing" : EMAIL_ISH.test(from) ? undefined : "expected a bare email address on a Resend-verified domain",
   });
 
-  const to = env.DIGEST_TO;
-  const recipients = (to ?? "").split(/[,\s]+/).filter((s) => s.includes("@"));
-  checks.push({
-    name: "DIGEST_TO",
-    ok: recipients.length > 0 && recipients.every((r) => EMAIL_ISH.test(r)),
-    severity: sev,
-    detail: !to ? "missing" : recipients.length === 0 ? "no address containing '@'" : recipients.every((r) => EMAIL_ISH.test(r)) ? undefined : "one or more recipients are not valid addresses",
-  });
+  // Recipients live in D1 (`digest_subscribers`, managed by the /digest slash command), not env.
 
   if (env.DIGEST_REPLY_TO && !EMAIL_ISH.test(env.DIGEST_REPLY_TO)) {
     checks.push({ name: "DIGEST_REPLY_TO", ok: false, severity: "warn", detail: "not a valid email address" });

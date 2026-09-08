@@ -19,6 +19,8 @@ REPLAY_KEY=op://headwater-prod/env/REPLAY_KEY
 SLACK_BOT_TOKEN=op://headwater-prod/env/SLACK_BOT_TOKEN
 # Slack channel id (e.g. C0123ABCD).
 SLACK_DEFAULT_CHANNEL=op://headwater-prod/env/SLACK_DEFAULT_CHANNEL
+# Slack app Signing Secret (Basic Information) — verifies the /digest slash command on /slack/commands.
+SLACK_SIGNING_SECRET=op://headwater-prod/env/SLACK_SIGNING_SECRET
 
 # Cloudflare Access identifiers (verify the Access JWT on /inspect + /api). Not secrets, but vault-held.
 ACCESS_TEAM_DOMAIN=op://headwater-prod/env/ACCESS_TEAM_DOMAIN

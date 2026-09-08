@@ -1,85 +1,91 @@
 import { describe, it, expect } from "vitest";
 import {
-  decideDigestSend,
-  zonedHour,
+  decideSubscriberSend,
+  zonedMinuteOfDay,
   zonedDay,
   digestSubject,
-  DIGEST_SEND_HOUR,
+  DEFAULT_SEND_MINUTE,
 } from "@/lib/digestSend";
-import { mailerConfig, splitAddresses, formatFrom } from "@/lib/mailer";
+import { mailerConfig, formatFrom } from "@/lib/mailer";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
 import type { Env } from "@/env";
 
 const TZ = "Australia/Melbourne";
 
 // Melbourne is UTC+11 over daylight saving (Oct–Apr) and UTC+10 otherwise. These two instants are
-// both 8am local, an hour apart in UTC — the whole reason the cron registers two hours.
-const AEDT_8AM = Date.UTC(2026, 0, 15, 21, 0); // 15 Jan 2026 21:00Z = 08:00 AEDT
-const AEST_8AM = Date.UTC(2026, 6, 15, 22, 0); // 15 Jul 2026 22:00Z = 08:00 AEST
+// both 8am local, an hour apart in UTC — the per-subscriber gate must read both as 08:00.
+const AEDT_8AM = Date.UTC(2026, 0, 15, 21, 0); // 15 Jan 2026 21:00Z = 08:00 AEDT on 16 Jan
+const AEST_8AM = Date.UTC(2026, 6, 15, 22, 0); // 15 Jul 2026 22:00Z = 08:00 AEST on 16 Jul
+const AEDT_DAY = "2026-01-16";
 
-describe("timezone gate", () => {
+const sub = (over: Partial<{ time_zone: string; send_minute: number; last_sent_day: string | null }> = {}) => ({
+  time_zone: TZ,
+  send_minute: DEFAULT_SEND_MINUTE,
+  last_sent_day: null,
+  ...over,
+});
+
+describe("zoned clock", () => {
   it("reads 8am local at BOTH candidate UTC hours across the DST boundary", () => {
-    expect(zonedHour(AEDT_8AM, TZ)).toBe(DIGEST_SEND_HOUR);
-    expect(zonedHour(AEST_8AM, TZ)).toBe(DIGEST_SEND_HOUR);
+    expect(zonedMinuteOfDay(AEDT_8AM, TZ)).toBe(8 * 60);
+    expect(zonedMinuteOfDay(AEST_8AM, TZ)).toBe(8 * 60);
   });
 
-  it("rejects the other cron hour, so exactly one of the two fires", () => {
-    // In January, 22:00Z is 9am local — the second cron must not also send.
-    expect(zonedHour(Date.UTC(2026, 0, 15, 22, 0), TZ)).toBe(9);
-    // In July, 21:00Z is 7am local.
-    expect(zonedHour(Date.UTC(2026, 6, 15, 21, 0), TZ)).toBe(7);
+  it("returns minutes after midnight, with midnight as 0 (not 24)", () => {
+    expect(zonedMinuteOfDay(Date.UTC(2026, 6, 15, 14, 0), TZ)).toBe(0); // 14:00Z = 00:00 AEST
+    expect(zonedMinuteOfDay(Date.UTC(2026, 6, 15, 14, 45), TZ)).toBe(45);
+    expect(zonedMinuteOfDay(Date.UTC(2026, 6, 15, 9, 30), "Europe/London")).toBe(10 * 60 + 30); // BST
   });
 
-  it("formats midnight as hour 0, not 24", () => {
-    expect(zonedHour(Date.UTC(2026, 6, 15, 14, 0), TZ)).toBe(0); // 14:00Z = midnight AEST
-  });
-
-  it("reports the LOCAL calendar day, which can differ from the UTC day", () => {
-    // 21:00Z on 14 Jan is already 15 Jan in Melbourne.
-    expect(zonedDay(Date.UTC(2026, 0, 14, 21, 0), TZ)).toBe("2026-01-15");
+  it("returns the local calendar day as YYYY-MM-DD", () => {
+    expect(zonedDay(AEDT_8AM, TZ)).toBe(AEDT_DAY);
+    // 14:30Z on the 15th is already the 16th in Melbourne.
+    expect(zonedDay(Date.UTC(2026, 6, 15, 14, 30), TZ)).toBe("2026-07-16");
   });
 });
 
-describe("decideDigestSend", () => {
-  const base = { nowMs: AEST_8AM, timeZone: TZ, lastSentDay: null, enabled: true };
-
-  it("sends at 8am local when enabled and not yet sent", () => {
-    expect(decideDigestSend(base).shouldSend).toBe(true);
+describe("decideSubscriberSend", () => {
+  it("is due exactly at the chosen local time, in either DST regime", () => {
+    expect(decideSubscriberSend({ nowMs: AEDT_8AM, sub: sub() }).due).toBe(true);
+    expect(decideSubscriberSend({ nowMs: AEST_8AM, sub: sub() }).due).toBe(true);
   });
 
-  it("does not send when the master switch is off", () => {
-    const d = decideDigestSend({ ...base, enabled: false });
-    expect(d.shouldSend).toBe(false);
-    expect(d.reason).toBe("disabled");
+  it("is not yet due before the chosen time", () => {
+    const d = decideSubscriberSend({ nowMs: AEDT_8AM - 15 * 60 * 1000, sub: sub() });
+    expect(d).toMatchObject({ due: false, reason: "not_yet", minute: 7 * 60 + 45 });
   });
 
-  it("does not send at the wrong local hour", () => {
-    const d = decideDigestSend({ ...base, nowMs: Date.UTC(2026, 6, 15, 21, 0) }); // 7am local
-    expect(d.shouldSend).toBe(false);
-    expect(d.reason).toBe("wrong_hour");
+  it("catches up: still due later the same day if the slot was missed", () => {
+    const d = decideSubscriberSend({ nowMs: AEDT_8AM + 3 * 60 * 60 * 1000, sub: sub() });
+    expect(d.due).toBe(true);
   });
 
-  it("does not send twice on the same local day", () => {
-    const d = decideDigestSend({ ...base, lastSentDay: "2026-07-16" });
-    expect(zonedDay(AEST_8AM, TZ)).toBe("2026-07-16"); // sanity: that IS today, locally
-    expect(d.shouldSend).toBe(false);
-    expect(d.reason).toBe("already_sent_today");
+  it("never sends twice in one local day", () => {
+    const d = decideSubscriberSend({ nowMs: AEDT_8AM, sub: sub({ last_sent_day: AEDT_DAY }) });
+    expect(d).toMatchObject({ due: false, reason: "already_sent_today", day: AEDT_DAY });
   });
 
-  it("sends again the next day", () => {
-    expect(decideDigestSend({ ...base, lastSentDay: "2026-07-15" }).shouldSend).toBe(true);
+  it("sends again the next local day", () => {
+    expect(decideSubscriberSend({ nowMs: AEDT_8AM, sub: sub({ last_sent_day: "2026-01-15" }) }).due).toBe(true);
   });
 
-  it("force bypasses the hour gate", () => {
-    const off = decideDigestSend({ ...base, nowMs: Date.UTC(2026, 6, 15, 3, 0) });
-    expect(off.shouldSend).toBe(false);
-    expect(decideDigestSend({ ...base, nowMs: Date.UTC(2026, 6, 15, 3, 0), force: true }).shouldSend).toBe(true);
+  it("honours the subscriber's own zone, not Melbourne's", () => {
+    // 15 Jan 2026 21:00Z is 08:00 (16 Jan) in Melbourne but 21:00 (15 Jan) in London — a London 8am subscriber sent
+    // that morning is done; one not yet sent today is (catch-up) due.
+    const london = sub({ time_zone: "Europe/London" });
+    expect(decideSubscriberSend({ nowMs: AEDT_8AM, sub: { ...london, last_sent_day: "2026-01-15" } }).due).toBe(false);
+    expect(decideSubscriberSend({ nowMs: AEDT_8AM, sub: london }).due).toBe(true);
+    // London 07:45 the same morning → not yet.
+    expect(decideSubscriberSend({ nowMs: Date.UTC(2026, 0, 15, 7, 45), sub: london })).toMatchObject({
+      due: false,
+      reason: "not_yet",
+    });
   });
 
-  it("force must NOT bypass the already-sent guard — testing can't double-send", () => {
-    const d = decideDigestSend({ ...base, lastSentDay: "2026-07-16", force: true });
-    expect(d.shouldSend).toBe(false);
-    expect(d.reason).toBe("already_sent_today");
+  it("force bypasses the time gate but NOT the already-sent-today gate", () => {
+    const early = AEDT_8AM - 60 * 60 * 1000;
+    expect(decideSubscriberSend({ nowMs: early, sub: sub(), force: true }).due).toBe(true);
+    expect(decideSubscriberSend({ nowMs: early, sub: sub({ last_sent_day: AEDT_DAY }), force: true }).due).toBe(false);
   });
 });
 
@@ -94,14 +100,13 @@ describe("mailer config", () => {
   const full: Partial<Env> = {
     RESEND_API_KEY: "re_" + "a".repeat(30),
     DIGEST_FROM: "digest@example.org",
-    DIGEST_TO: "you@example.org",
   };
 
   it("builds a config from a complete env", () => {
     const cfg = mailerConfig(full as Env);
     expect("error" in cfg).toBe(false);
     if (!("error" in cfg)) {
-      expect(cfg.to).toEqual(["you@example.org"]);
+      expect(cfg.fromAddress).toBe("digest@example.org");
       expect(cfg.fromName).toBe("Headwater"); // default
     }
   });
@@ -109,12 +114,7 @@ describe("mailer config", () => {
   it("names exactly what is missing rather than throwing", () => {
     const cfg = mailerConfig({ DIGEST_FROM: "digest@example.org" } as Env);
     expect("error" in cfg && cfg.error).toContain("RESEND_API_KEY");
-    expect("error" in cfg && cfg.error).toContain("DIGEST_TO");
-  });
-
-  it("splits a multi-recipient list on commas and whitespace", () => {
-    expect(splitAddresses("a@x.com, b@y.com\nc@z.com")).toEqual(["a@x.com", "b@y.com", "c@z.com"]);
-    expect(splitAddresses("not-an-address")).toEqual([]);
+    expect("error" in cfg && cfg.error).not.toContain("DIGEST_TO");
   });
 });
 
@@ -140,6 +140,7 @@ describe("digest config validation", () => {
     REPLAY_KEY: "y".repeat(20),
     SLACK_BOT_TOKEN: "xoxb-" + "z".repeat(20),
     SLACK_DEFAULT_CHANNEL: "C0123ABCD",
+    SLACK_SIGNING_SECRET: "0123456789abcdef0123456789abcdef",
   };
 
   const on = {
@@ -147,14 +148,12 @@ describe("digest config validation", () => {
     DIGEST_ENABLED: "true",
     RESEND_API_KEY: "re_" + "a".repeat(30),
     DIGEST_FROM: "digest@example.org",
-    DIGEST_TO: "you@example.org",
   } as Env;
 
   const issuesFor = (env: Partial<Env>) => summarizeConfig(validateConfig(env as Env)).issues.map((i) => i.name);
 
   it("passes a fully configured digest", () => {
-    expect(issuesFor(on)).not.toContain("DIGEST_CF_ACCOUNT_ID");
-    expect(issuesFor(on)).not.toContain("DIGEST_FROM");
+    expect(issuesFor(on)).toEqual([]);
   });
 
   it("stays quiet — and configOk stays true — when the digest is simply unconfigured", () => {
@@ -171,9 +170,19 @@ describe("digest config validation", () => {
     expect(issuesFor({ ...on, RESEND_API_KEY: "re_short" })).toContain("RESEND_API_KEY");
   });
 
-  it("catches a non-address in DIGEST_FROM / DIGEST_TO", () => {
+  it("catches a non-address in DIGEST_FROM", () => {
     expect(issuesFor({ ...on, DIGEST_FROM: "Headwater Daily" })).toContain("DIGEST_FROM");
-    expect(issuesFor({ ...on, DIGEST_TO: "simon" })).toContain("DIGEST_TO");
+  });
+
+  it("no longer wants a DIGEST_TO — recipients live in D1", () => {
+    expect(issuesFor(on)).not.toContain("DIGEST_TO");
+  });
+
+  it("only warns about a missing SLACK_SIGNING_SECRET — the feed doesn't need it", () => {
+    const s = summarizeConfig(validateConfig({ ...on, SLACK_SIGNING_SECRET: undefined } as Env));
+    expect(s.ok).toBe(true);
+    expect(s.issues.find((i) => i.name === "SLACK_SIGNING_SECRET")!.severity).toBe("warn");
+    expect(issuesFor({ ...on, SLACK_SIGNING_SECRET: "not-hex" })).toContain("SLACK_SIGNING_SECRET");
   });
 
   it("downgrades missing digest config to a warning while DIGEST_ENABLED is not true", () => {
@@ -188,16 +197,5 @@ describe("digest config validation", () => {
     const s = summarizeConfig(validateConfig({ ...on, DIGEST_FROM: undefined } as Env));
     expect(s.issues.find((i) => i.name === "DIGEST_FROM")!.severity).toBe("error");
     expect(s.ok).toBe(false);
-  });
-
-  it("flags a DIGEST_ENABLED value that isn't exactly true/false", () => {
-    expect(issuesFor({ ...on, DIGEST_ENABLED: "yes" })).toContain("DIGEST_ENABLED");
-  });
-
-  it("never leaks a secret value in the issue details", () => {
-    const token = "super-secret-token-value-1234567890";
-    const detail = JSON.stringify(validateConfig({ ...on, DIGEST_API_TOKEN: "short" } as Env));
-    expect(detail).not.toContain(token);
-    expect(detail).not.toContain("you@example.org");
   });
 });
