@@ -64,6 +64,10 @@
     //   stragglers re-post (seen-aware, so everything already delivered is skipped).
     // - "0 * * * *" — hourly ingestion heartbeat: alert Slack if Meltwater webhooks go quiet
     //   (src/lib/heartbeat.ts).
-    "crons": ["*/15 * * * *", "0 * * * *"]
+    // - "0 21 * * *" + "0 22 * * *" — daily digest email. Cron fires on UTC, but the send is pinned
+    //   to 8am Melbourne, which is UTC+11 over daylight saving and UTC+10 otherwise. Registering BOTH
+    //   candidate hours and gating in code (src/lib/digestSend.ts) keeps the send at 8am local
+    //   year-round; exactly one of the two passes the gate on any given day.
+    "crons": ["*/15 * * * *", "0 * * * *", "0 21 * * *", "0 22 * * *"]
   }
 }

@@ -182,6 +182,63 @@ pnpm run deploy                                 # → your custom domain (worker
 The last two secrets come from the Cloudflare Access setup — see [Access & security model](#access--security-model),
 which also explains why `/inspect` and `/admin/*` are **non-functional until you configure it**.
 
+### Configuration reference
+
+Every environment variable the Worker reads. **Secrets** go in `.dev.vars` locally and
+`wrangler secret put <NAME>` in prod — never in `wrangler.jsonc`, which is committed. **Vars** are
+non-secret and live in `wrangler.jsonc` under `vars` (or as a secret if you prefer).
+
+`GET /health` returns `configOk`, a format check over most of these — see [Monitoring](#monitoring).
+It reports names and reasons only, never values.
+
+#### Bindings (declared in `wrangler.jsonc`, not set as secrets)
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `DB` | D1 | `webhook_events`, `stories`, `seen_mentions`, `ops_state` — see `migrations/` |
+| `INGEST_QUEUE` | Queue | Sequential ingestion (`max_concurrency: 1`). Absent → the handler falls back to the in-request `waitUntil` path |
+| `STATION_RENDERER` | Durable Object | Serial broadcast-station render drainer |
+| `BROWSER` | Browser Rendering | Resolves station names from the JS-rendered Meltwater viewer; launched only by the DO |
+
+#### Core — the Worker will not function without these
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `WEBHOOK_SHARED_SECRET` | secret | Path token for `POST /webhooks/meltwater/:token`. The token **is** the auth. Generate: `openssl rand -hex 32` |
+| `REPLAY_KEY` | secret | Bearer token guarding every `/admin/*` route. Generate: `openssl rand -hex 32` |
+| `SLACK_BOT_TOKEN` | secret | `xoxb-…` bot token with `chat:write` |
+| `SLACK_DEFAULT_CHANNEL` | secret | Channel id (`C0123ABCD`) or `#name` |
+| `POSTING_ENABLED` | var | Strict `"true"` to post to Slack. Anything else pauses posting (the pipeline still previews in `/inspect`) |
+
+#### Cloudflare Access — `/inspect` and `/api` are non-functional without these
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `ACCESS_TEAM_DOMAIN` | secret | `https://<team>.cloudflareaccess.com` — Zero Trust → Settings |
+| `ACCESS_AUD` | secret | Application Audience (AUD) tag for the Access app |
+| `DEV_SKIP_ACCESS` | **local only** | `"true"` in `.dev.vars` bypasses the Access check, because `wrangler dev` has no Access in front of it. Never set in `wrangler.jsonc` or prod |
+
+#### Ingestion heartbeat — all optional, sensible defaults
+
+| Name | Kind | Default | Purpose |
+|---|---|---|---|
+| `HEARTBEAT_MAX_SILENCE_HOURS` | var | `24` | Alert if no mention has arrived in this many hours |
+| `HEARTBEAT_REALERT_HOURS` | var | `6` | While a stall persists, re-alert at most this often |
+| `SLACK_ALERT_CHANNEL` | var | `SLACK_DEFAULT_CHANNEL` | Channel for heartbeat alerts |
+
+#### Daily digest email — see [Daily digest email](#daily-digest-email)
+
+| Name | Kind | Required | Purpose |
+|---|---|---|---|
+| `DIGEST_ENABLED` | var | yes | Strict `"true"` to actually send. Anything else = no mail is ever sent |
+| `DIGEST_CF_ACCOUNT_ID` | secret | yes | Cloudflare account id (32-char hex) owning the onboarded sending domain |
+| `DIGEST_API_TOKEN` | secret | yes | API token scoped to Email Sending on that account |
+| `DIGEST_FROM` | secret | yes | From address on the onboarded domain, e.g. `daily@news.climate200.com.au` |
+| `DIGEST_TO` | secret | yes | Recipients, comma- or whitespace-separated |
+| `DIGEST_FROM_NAME` | var | no (`Headwater`) | Display name on the From header |
+| `DIGEST_REPLY_TO` | var | no | Set this if `DIGEST_FROM` isn't a real mailbox, so replies don't bounce |
+| `DIGEST_SLACK_URL` | var | no | Slack channel link for the digest footer |
+
 ## Wire up Meltwater
 Two separate steps. Registering the webhook **destination** is not enough on its own — you must also
 point one or more **alerts** at it. Both live in the Meltwater app.
@@ -310,6 +367,44 @@ The trailing `created_at` identifies one posted card. Merging looks up the newes
 history. Without it the key was eternal while the lookup was windowed, so a headline recurring after
 72h posted a fresh card, collided on INSERT, and `ON CONFLICT DO UPDATE` repointed the row at the new
 message — orphaning the old card. That was 16 of the 17 orphans swept on 2026-09-08.
+
+## Daily digest email
+A once-a-day email of the stories from the last 24 hours, rendered as the same cards the Slack feed
+posts. `GET /digest` previews it (Access-gated; `?days=7`, `?text=1` for the plain-text part), and
+`src/ui/email.ts` is the email twin of the `/inspect` card renderer — same `SlackAttachment`, email-safe
+markup (nested tables, inline styles) because Gmail and Outlook strip `<style>` blocks and positioned
+pseudo-elements.
+
+**Sending domain.** Email Sending is *account-scoped*: the `from` domain must be onboarded in the same
+account as the token used to send. Because this Worker's account and the sending domain can differ, the
+digest uses the **REST API** (`src/lib/mailer.ts`) rather than the `send_email` binding — the binding
+can only see domains onboarded in the Worker's own account.
+
+Onboard a **subdomain** (e.g. `news.climate200.com.au`) rather than the apex: the subdomain gets its own
+SPF record, leaving the parent domain's existing SPF/DKIM/MX — i.e. your real corporate mail — untouched.
+
+```bash
+# run against the account that owns the zone (dashboard: Compute & AI → Email Service → Email Sending)
+npx wrangler email sending enable news.climate200.com.au
+npx wrangler email sending dns get news.climate200.com.au   # verify the SPF + DKIM records
+```
+This writes DNS records, so it needs credentials for that account with Email Sending **and** DNS write.
+
+**Schedule.** Cron Triggers fire on UTC, but the send is pinned to **8am Melbourne** — UTC+11 over
+daylight saving, UTC+10 otherwise. `wrangler.jsonc` therefore registers *both* candidate hours
+(`0 21 * * *` and `0 22 * * *`) and `src/lib/digestSend.ts` lets exactly one through, so the send never
+drifts by an hour across the DST boundary.
+
+**Send-once.** The Melbourne calendar day of the last send is recorded in `ops_state`, so a cron retry,
+a manual run, or both cron hours firing can never double-send. The marker is written only *after* the
+mail API accepts the message, so a failed send retries on the next tick.
+
+**Testing.** `POST /admin/digest-send` (`Authorization: Bearer REPLAY_KEY`) runs the same code path:
+- `?dryRun=1` — build and render, report the story count, send **nothing** (ignores `DIGEST_ENABLED`)
+- `?force=1` — bypass the 8am gate for a real send
+
+`force` deliberately does **not** bypass the already-sent-today guard: testing must never be able to
+double-send a real digest.
 
 ## Monitoring
 Two guardrails exist because a webhook-secret mismatch (or a stalled upstream) can silence the feed
