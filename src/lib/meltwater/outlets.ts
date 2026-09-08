@@ -167,6 +167,7 @@ const MASTHEAD_BY_DOMAIN: Record<string, string> = {
   "manofmany.com": "Man of Many",
   "maribyrnonghobsonsbay.starweekly.com.au": "Maribyrnong & Hobsons Bay Star Weekly", // Star Weekly is
   //   keyed per edition subdomain; a bare starweekly.com.au would mislabel every other edition
+  "ncreview.com.au": "The North Central Review",
   "neoskosmos.com": "Neos Kosmos",
   "nowtolove.com.au": "Now to Love",
   "oncologyrepublic.com.au": "Oncology Republic",
