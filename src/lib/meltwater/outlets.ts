@@ -108,6 +108,7 @@ const MASTHEAD_BY_DOMAIN: Record<string, string> = {
   "braidwoodtimes.com.au": "Braidwood Times",
   "farmweekly.com.au": "Farm Weekly",
   "gloucesteradvocate.com.au": "Gloucester Advocate",
+  "hepburnadvocate.com.au": "The Advocate — Hepburn",
   "huntervalleynews.net.au": "Hunter Valley News",
   "inverelltimes.com.au": "The Inverell Times",
   "jimboombatimes.com.au": "Jimboomba Times",
@@ -146,6 +147,7 @@ const MASTHEAD_BY_DOMAIN: Record<string, string> = {
   "canberradaily.com.au": "Canberra Daily",
   "catholicweekly.com.au": "The Catholic Weekly",
   "channelnews.com.au": "ChannelNews",
+  "convenienceworldmagazine.com.au": "Convenience World", // logo is "CW / Convenience World"
   "cqtoday.com.au": "CQ Today",
   "cyberdaily.au": "Cyber Daily",
   "deepcutnews.com": "Deepcut News",
@@ -169,13 +171,21 @@ const MASTHEAD_BY_DOMAIN: Record<string, string> = {
   "nowtolove.com.au": "Now to Love",
   "oncologyrepublic.com.au": "Oncology Republic",
   "psnews.com.au": "PS News",
+  "qnews.com.au": "QNews",
   "radioinfo.com.au": "radioinfo", // lower-case brand, like marie claire
   "russh.com": "RUSSH",
   "screenhub.com.au": "ScreenHub",
   "smartcompany.com.au": "SmartCompany",
+  "smbtech.au": "SMBtech",
   "southwestlocalnews.com.au": "South West Local News",
+  "starobserver.com.au": "Star Observer",
   "startsat60.com": "Starts at 60",
   "stplnews.com.au": "STPL News",
+  // The Sun-Herald is the SMH's Sunday masthead and has no domain of its own, so Meltwater resolves its
+  // publisher home to the unrelated US sunherald.com (Biloxi, Mississippi). Verified before mapping: all
+  // three archived items land 02:31 Sydney on a SUNDAY, carry an identical 385k print reach, and are
+  // bylined SMH staff (Bevan Shields, Matthew Knott, Caitlin Fitzsimmons) on Sydney stories.
+  "sunherald.com": "The Sun-Herald",
   "sunraysiadaily.com.au": "Sunraysia Daily",
   "sydneyartsguide.com.au": "Sydney Arts Guide",
   "tasmanianinquirer.com.au": "Tasmanian Inquirer",

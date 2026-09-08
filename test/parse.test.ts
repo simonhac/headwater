@@ -65,6 +65,12 @@ describe("mastheadForDomain (outlets.ts)", () => {
     expect(mastheadForDomain("starweekly.com.au")).toBeNull();
   });
 
+  it("maps The Sun-Herald from the unrelated US domain Meltwater cites for it", () => {
+    // Not a mistake: the SMH's Sunday masthead has no domain of its own, so Meltwater points at the
+    // Biloxi paper's sunherald.com. Every archived item is a Sunday print drop bylined by SMH staff.
+    expect(mastheadForDomain("sunherald.com")).toBe("The Sun-Herald");
+  });
+
   it("leaves multi-masthead publishers unmapped", () => {
     // Active Networks publishes Peninsula Living, North Shore Living and Think Local — a mapped name
     // wins over authorName, so mapping the domain would stamp the wrong magazine on their articles.
