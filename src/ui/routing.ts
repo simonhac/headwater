@@ -135,10 +135,9 @@ ${p.error ? `<div class="error">${escHtml(p.error)}</div>` : ""}
 </table>
 <div class="actions"><button type="submit">Save routing</button><span class="muted">${saved}</span></div>
 </form>
-<p class="hint">A tick means that channel receives that brief — that's the whole rule. Greyed ticks are
-briefs that have never been routed: they post to ${escHtml(defaultLabel)} by default, and saving makes
-that explicit. Untick every box in a row and the brief posts <strong>nowhere</strong>. The same headline
-routed to two channels is two separate cards — they never fold into one.</p>
+<p class="hint">A tick means that channel receives that brief. Greyed ticks are briefs that have never
+been routed: they post to ${escHtml(defaultLabel)} by default. If every box in a row is unticked, the
+brief is never posted to Slack.</p>
 <p class="hint">Don't see a channel? <span class="mono">/invite @headwater</span> in it, then ↻ refresh.</p>
 ${p.diagnostic ? `<p class="hint mono">${escHtml(p.diagnostic)}</p>` : ""}
 </main>
