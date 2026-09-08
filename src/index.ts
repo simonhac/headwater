@@ -8,6 +8,7 @@ import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
 import { coalesceDuplicateStories } from "@/lib/coalesce";
 import { sweepOrphans } from "@/lib/orphans";
+import { repairSnippets } from "@/lib/snippets";
 import { cleanupTestPosts, sendTestPosts } from "@/lib/testpost";
 import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
 import { pokeStationRender, getRenderState } from "@/do/client";
@@ -107,7 +108,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-23", // bump on each deploy to confirm the running code
+    build: "headwater-24", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
@@ -252,6 +253,28 @@ app.post("/admin/coalesce", async (c) => {
   try {
     const result = await coalesceDuplicateStories(c.env, { hours, dryRun, now: Date.now() });
     return c.json(result);
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
+// --- admin: repair snippets Meltwater truncated mid-sentence (leading ". " / ", ") in stories
+// ALREADY stored, rewriting both the primary snapshot and each outlet's copy, and chat.updating any
+// card whose rendering changes. Unlike /admin/redecode this touches outlets_json (where a
+// high-reach outlet's own snippet leads the card) and persists data-only fixes. Gated by
+// REPLAY_KEY; `dryRun=1` previews; `hours=N` sets the window (default 720); capped at 40 updates
+// per call (re-run until `remaining` is 0). ---
+app.post("/admin/repair-snippets", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const dryRun = c.req.query("dryRun") === "1";
+  if (!dryRun && c.env.POSTING_ENABLED !== "true") {
+    return c.text("POSTING_ENABLED is not true (use dryRun=1 to preview)", 409);
+  }
+  const hours = Number(c.req.query("hours") ?? 720);
+  try {
+    return c.json(await repairSnippets(c.env, { hours: Number.isFinite(hours) ? hours : 720, dryRun, now: Date.now() }));
   } catch (e) {
     return c.json({ error: String(e) }, 500);
   }

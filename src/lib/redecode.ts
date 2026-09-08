@@ -79,8 +79,13 @@ export function resolveBroadcast(
  * `render_hash` (the card as last sent to Slack) is what detects a change — this catches both parse-
  * level changes and format changes (e.g. the "also mentions" fix) that a snapshot diff would miss.
  */
-export function renderStoryCard(row: StoryRow, primary: NormalizedMention): { attachment: SlackAttachment; hash: string } {
-  const outlets = JSON.parse(row.outlets_json) as Outlet[];
+export function renderStoryCard(
+  row: StoryRow,
+  primary: NormalizedMention,
+  /** Outlets to render instead of the row's stored ones — used by backfills that rewrite them. */
+  outletsOverride?: Outlet[],
+): { attachment: SlackAttachment; hash: string } {
+  const outlets = outletsOverride ?? (JSON.parse(row.outlets_json) as Outlet[]);
   const briefLabels = JSON.parse(row.brief_labels_json || "[]") as string[];
   const attachment = buildStoryAttachment(primary, resolveBrief(primary, feedConfig), outlets, briefLabels.slice(1), row.created_at);
   return { attachment, hash: attachmentHash(attachment) };

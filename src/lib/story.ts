@@ -234,6 +234,19 @@ export class StoryStore {
     await this.db.prepare(`DELETE FROM stories WHERE story_key = ?`).bind(key).run();
   }
 
+  /**
+   * Rewrite the stored text of a story WITHOUT touching `updated_at` — for data repairs (e.g. the
+   * snippet backfill) rather than new activity. Bumping recency here would be actively harmful: it
+   * would drag a long-settled story back inside the 72h syndication window and make it a live merge
+   * target again. Mirrors `updateRenderState`, which leaves recency alone for the same reason.
+   */
+  async repairText(key: string, primary: unknown, outlets: Outlet[], renderHash: string | null): Promise<void> {
+    await this.db
+      .prepare(`UPDATE stories SET primary_mention_json = ?, outlets_json = ?, render_hash = ? WHERE story_key = ?`)
+      .bind(JSON.stringify(primary), JSON.stringify(outlets), renderHash, key)
+      .run();
+  }
+
   /** Persist a coalesced canonical in one write: the re-resolved primary snapshot, the merged outlet
    * + matched-brief lists, and the new render hash. Recency is bumped so the hourly heal keeps the
    * fix rather than reviving a stale render. Used by the coalesce backfill. */
