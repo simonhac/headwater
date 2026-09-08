@@ -44,11 +44,14 @@ const form = (pairs: [string, string][]) => {
 
 describe("/inspect/routing", () => {
   let listPages: unknown[][];
+  /** Every conversations.list request, so the test can assert HOW it was called, not just that it was. */
+  let listCalls: { method: string; params: Record<string, string> }[];
 
   beforeEach(async () => {
     await env.DB.prepare("DELETE FROM ops_state").run();
     await env.DB.prepare("DELETE FROM stories").run();
     await env.DB.prepare("DELETE FROM seen_mentions").run();
+    listCalls = [];
     listPages = [
       [
         { id: DEFAULT_CH, name: "media-monitoring", is_member: true, is_private: false },
@@ -61,8 +64,12 @@ describe("/inspect/routing", () => {
       vi.fn(async (url: string | URL, init?: RequestInit) => {
         const u = String(url);
         if (u.includes("conversations.list")) {
-          const body = JSON.parse(String(init!.body)) as { cursor?: string };
-          const i = body.cursor ? Number(body.cursor) : 0;
+          // conversations.list takes its args as QUERY PARAMS. A JSON body is silently ignored by
+          // Slack (it answers ok:true from defaults), so read only the query here — a regression to
+          // a POST body would surface as page 0 forever and an empty picker.
+          const params = Object.fromEntries(new URL(u).searchParams);
+          listCalls.push({ method: init?.method ?? "GET", params });
+          const i = params.cursor ? Number(params.cursor) : 0;
           const next = i + 1 < listPages.length ? String(i + 1) : "";
           return Response.json(page(listPages[i]!, next));
         }
@@ -72,6 +79,16 @@ describe("/inspect/routing", () => {
   });
 
   afterEach(() => vi.unstubAllGlobals());
+
+  it("asks Slack for public AND private channels via query params, following the cursor", async () => {
+    await call("/inspect/routing");
+    expect(listCalls).toHaveLength(2); // page 1, then the next_cursor page
+    expect(listCalls[0]).toEqual({
+      method: "GET",
+      params: { types: "public_channel,private_channel", exclude_archived: "true", limit: "200" },
+    });
+    expect(listCalls[1]!.params.cursor).toBe("1");
+  });
 
   it("renders a column per member channel, following the cursor, and hides non-member channels", async () => {
     const html = await (await call("/inspect/routing")).text();

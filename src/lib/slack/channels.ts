@@ -7,7 +7,7 @@
  * typed error so the page can say so instead of rendering an empty table.
  */
 import type { Env } from "@/env";
-import { slackApi } from "./post";
+import { slackApiGet } from "./post";
 
 export interface SlackChannel {
   id: string;
@@ -26,8 +26,9 @@ interface ConversationsList {
   response_metadata?: { next_cursor?: string };
 }
 
-/** Cap the cursor walk: 10 × 1000 is far more channels than any workspace the bot joins. */
-const MAX_PAGES = 10;
+/** Slack recommends ≤200 results per conversations.list page; 20 pages covers 4000 channels. */
+const PAGE_SIZE = "200";
+const MAX_PAGES = 20;
 
 export async function listBotChannels(env: Env): Promise<ChannelList> {
   if (!env.SLACK_BOT_TOKEN) return { channels: [], error: "no_slack_token" };
@@ -35,10 +36,12 @@ export async function listBotChannels(env: Env): Promise<ChannelList> {
   const out: SlackChannel[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_PAGES; page++) {
-    const res = await slackApi<ConversationsList>(env.SLACK_BOT_TOKEN, "conversations.list", {
+    // GET with query params — conversations.list ignores a JSON body and silently falls back to
+    // its defaults (public channels, first 100, no cursor). See slackApiGet.
+    const res = await slackApiGet<ConversationsList>(env.SLACK_BOT_TOKEN, "conversations.list", {
       types: "public_channel,private_channel",
-      exclude_archived: true,
-      limit: 1000,
+      exclude_archived: "true",
+      limit: PAGE_SIZE,
       ...(cursor ? { cursor } : {}),
     });
     if (!res.ok) return { channels: out, error: res.error ?? "unknown" };
