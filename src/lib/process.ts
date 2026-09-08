@@ -18,6 +18,7 @@ import { broadcastMediumLabel } from "@/lib/slack/format";
 import { enqueueStationRender, resolveStationNow } from "@/do/client";
 import { decide } from "@/lib/decide";
 import { sha256Hex } from "@/lib/ids";
+import { channelsFor, loadRouting } from "@/lib/routing";
 
 /** Only merge syndications seen within this window; older repeats are treated as new stories. */
 const SYNDICATION_WINDOW_MS = 72 * 60 * 60 * 1000;
@@ -40,6 +41,8 @@ export interface DocResult {
   source: string | null;
   url: string | null;
   brief?: string;
+  /** The Slack channel this result concerns. A mention routed to N channels yields N results. */
+  channel?: string;
   /** "preview" = passed filters but POSTING_ENABLED=false. "merged" = folded into an existing story. */
   decision: "posted" | "dropped" | "duplicate" | "preview" | "merged";
   reason?: string;
@@ -117,9 +120,10 @@ function promoteStation(mention: NormalizedMention, station: string): void {
 }
 
 /**
- * The recent broadcast story this mention duplicates, or null. Delegates the per-candidate decision
- * to the shared `isNearDupPair` predicate (same media type + air-time proximity, then SimHash fast
- * path or phrase containment + verbatim run), so ingestion and the coalesce backfill judge dups
+ * The recent broadcast story in the SAME channel that this mention duplicates, or null. Delegates
+ * the per-candidate decision to the shared `isNearDupPair` predicate (same media type + air-time
+ * proximity, then SimHash fast path or phrase containment + verbatim run), so ingestion and the
+ * coalesce backfill judge dups
  * identically. An identical-enough fingerprint short-circuits to that candidate; otherwise the
  * highest phrase-overlap candidate wins.
  */
@@ -129,6 +133,7 @@ async function findNearDup(
   fp: bigint | null,
   sketch: PhraseSketch | null,
   now: number,
+  channel: string,
 ): Promise<StoryRow | null> {
   const since = now - nd.windowHours * 60 * 60 * 1000;
   const inc: NearDupSide = {
@@ -142,7 +147,7 @@ async function findNearDup(
 
   let best: StoryRow | null = null;
   let bestOverlap = -1;
-  for (const c of await stories.recentWithSimhash(since)) {
+  for (const c of await stories.recentWithSimhash(since, channel)) {
     const v = isNearDupPair(inc, sideForStory(c, nd), nd);
     if (v.fast) return c; // fast path — accept the first (oldest) all-but-identical fingerprint.
     if (v.match && v.overlap > bestOverlap) {
@@ -167,6 +172,7 @@ export async function processEvent(
 ): Promise<ProcessSummary> {
   const postingEnabled = env.POSTING_ENABLED === "true";
   const stories = new StoryStore(env.DB);
+  const routing = await loadRouting(env.DB);
   const mentions = parseWebhookPayload(payload);
   const { kept, dropped } = applyFilters(mentions, feedConfig);
 
@@ -197,96 +203,129 @@ export async function processEvent(
     // for any clip whose station never resolved, exhausting the daily budget.
     if (broadcast && !mention.url) await resolveBroadcastOutlet(env, mention, now);
 
-    // Brief-scoped so the SAME article matched by a DIFFERENT brief isn't silently dropped as a
-    // duplicate — it flows into the merge path below and is recorded as "also matched".
+    // Where this brief posts: its routed channels, or the default channel when unrouted.
+    const channels = channelsFor(brief.id, routing, env);
+
+    // Brief- AND channel-scoped so the SAME article matched by a DIFFERENT brief — or destined for a
+    // DIFFERENT channel — isn't silently dropped as a duplicate. A same-brief repeat flows into the
+    // merge path below and is recorded as "also matched".
     const canonical = mention.url ?? `${mention.sourceName}|${mention.title}`;
-    const dedupeKey = await sha256Hex(`${brief.id}|${canonical}`);
-    const isSeen = await seen.has(dedupeKey);
+    // TODO(fanout-cutover): drop `legacyKey` and the `defaultChannel` comparison once every
+    // pre-fanout mention has aged out of the 72h reconcile window (deploy date + 72h).
+    const legacyKey = await sha256Hex(`${brief.id}|${canonical}`);
+    const defaultChannel = env.SLACK_DEFAULT_CHANNEL ?? "";
+    const dedupeKeys = new Map<string, string>(); // channel → its per-channel seen key
+    const seenByChannel = new Map<string, boolean>();
+    for (const ch of channels) {
+      const k = await sha256Hex(`${brief.id}|${ch}|${canonical}`);
+      dedupeKeys.set(ch, k);
+      // The default channel also honours the pre-fanout key, so the 72h reconcile doesn't repost
+      // everything it already delivered. Heal forward: record the new key (INSERT OR IGNORE, so
+      // re-writing an existing one is free) and the legacy branch can be deleted after cutover.
+      const legacyApplies = ch === defaultChannel;
+      const hit = await seen.hasAny(legacyApplies ? [k, legacyKey] : [k]);
+      if (hit && legacyApplies) await seen.add(k, mention.url ?? "", now);
+      seenByChannel.set(ch, hit);
+    }
+    const anyUnseen = channels.some((ch) => !seenByChannel.get(ch));
 
-    // A url-bearing broadcast we're actually about to post/merge still needs its station for the card
-    // (`buildAttachment` below). Duplicates skip this — their card is only a debug preview.
-    if (broadcast && mention.url && !isSeen) await resolveBroadcastOutlet(env, mention, now, true);
+    // A url-bearing broadcast we're actually about to post/merge somewhere still needs its station
+    // for the card (`buildAttachment` below). All-duplicate mentions skip this — their card is only
+    // a debug preview. Resolved once per mention, not per channel: it mutates `mention`.
+    if (broadcast && mention.url && anyUnseen) await resolveBroadcastOutlet(env, mention, now, true);
 
-    const channel = brief.channel ?? env.SLACK_DEFAULT_CHANNEL ?? "";
     const blocks = buildAttachment(mention, brief, [], [], now); // stored on DocResult for the /inspect preview
     const base = { title: mention.title, source: mention.sourceName, url: mention.url, brief: brief.label, blocks };
 
-    // Fingerprint + existing-story lookup are only needed when we might actually post/merge.
+    // Fingerprints are channel-independent, so compute them once for the whole fanout — only the
+    // story lookup below is per-channel.
     let simhashStr: string | null = null;
-    let key: string | null = null;
-    let existing: StoryRow | null = null;
-    if (!isSeen && postingEnabled) {
+    let simFp: bigint | null = null;
+    let sketch: PhraseSketch | null = null;
+    if (anyUnseen && postingEnabled) {
       const doNearDup = nd.enabled && broadcast;
-      const simFp = doNearDup ? simhash64(mention.snippet, nd.shingleSize) : null;
+      simFp = doNearDup ? simhash64(mention.snippet, nd.shingleSize) : null;
       simhashStr = simFp === null ? null : simFp.toString();
-      const sketch = doNearDup ? buildSketch(mention.snippet, nd.containmentShingleSize) : null;
-      key = mention.title ? await storyKey(mention.title) : null;
-      // Same-title syndication first; then broadcast near-duplicate by shared phrase.
-      existing = key ? await stories.getFresh(key, now - SYNDICATION_WINDOW_MS) : null;
-      if (!existing && (simFp !== null || sketch !== null)) {
-        existing = await findNearDup(stories, mention, simFp, sketch, now);
+      sketch = doNearDup ? buildSketch(mention.snippet, nd.containmentShingleSize) : null;
+    }
+
+    for (const channel of channels) {
+      const dedupeKey = dedupeKeys.get(channel) as string;
+      const isSeen = seenByChannel.get(channel) === true;
+      const chBase = { ...base, channel };
+
+      let key: string | null = null;
+      let existing: StoryRow | null = null;
+      if (!isSeen && postingEnabled) {
+        key = mention.title ? await storyKey(channel, mention.title) : null;
+        // Same-title syndication first; then broadcast near-duplicate by shared phrase.
+        existing = key ? await stories.getFresh(key, now - SYNDICATION_WINDOW_MS) : null;
+        if (!existing && (simFp !== null || sketch !== null)) {
+          existing = await findNearDup(stories, mention, simFp, sketch, now, channel);
+        }
       }
-    }
 
-    const action = decide({ seen: isSeen, postingEnabled, existing: !!existing });
+      const action = decide({ seen: isSeen, postingEnabled, existing: !!existing });
 
-    if (action === "duplicate") {
-      duplicates++;
-      results.push({ ...base, decision: "duplicate" });
-      continue;
-    }
+      if (action === "duplicate") {
+        duplicates++;
+        results.push({ ...chBase, decision: "duplicate" });
+        continue;
+      }
 
-    if (action === "preview") {
-      results.push({ ...base, decision: "preview", reason: "POSTING_ENABLED=false" });
-      continue;
-    }
+      if (action === "preview") {
+        results.push({ ...chBase, decision: "preview", reason: "POSTING_ENABLED=false" });
+        continue;
+      }
 
-    if (action === "merge" && existing) {
-      const outlets = addOutlet(JSON.parse(existing.outlets_json) as Outlet[], outletOf(mention));
-      const briefLabels = addBriefLabel(JSON.parse(existing.brief_labels_json || "[]") as string[], brief.label);
-      const primary = JSON.parse(existing.primary_mention_json) as NormalizedMention;
-      const primaryBrief = resolveBrief(primary, feedConfig);
-      const mergedCard = buildStoryAttachment(primary, primaryBrief, outlets, briefLabels.slice(1), existing.created_at);
-      const upd = await updateSlack(env, { channel: existing.channel, ts: existing.slack_ts, attachments: [mergedCard] });
-      // Only commit state when the update landed — mirror the post path. A failed update leaves the
-      // mention un-`seen` and un-counted so a replay/reconcile retries it (the G1 fix). Committing
-      // unconditionally would mark it `seen` forever and drop the syndicated outlet permanently.
-      if (upd.ok) {
-        await stories.updateOutlets(existing.story_key, outlets, briefLabels, attachmentHash(mergedCard), now);
+      if (action === "merge" && existing) {
+        const outlets = addOutlet(JSON.parse(existing.outlets_json) as Outlet[], outletOf(mention));
+        const briefLabels = addBriefLabel(JSON.parse(existing.brief_labels_json || "[]") as string[], brief.label);
+        const primary = JSON.parse(existing.primary_mention_json) as NormalizedMention;
+        const primaryBrief = resolveBrief(primary, feedConfig);
+        const mergedCard = buildStoryAttachment(primary, primaryBrief, outlets, briefLabels.slice(1), existing.created_at);
+        const upd = await updateSlack(env, { channel: existing.channel, ts: existing.slack_ts, attachments: [mergedCard] });
+        // Only commit state when the update landed — mirror the post path. A failed update leaves the
+        // mention un-`seen` and un-counted so a replay/reconcile retries it (the G1 fix). Committing
+        // unconditionally would mark it `seen` forever and drop the syndicated outlet permanently.
+        // Per channel, so a partial fanout failure only leaves the FAILED channel retryable.
+        if (upd.ok) {
+          await stories.updateOutlets(existing.story_key, outlets, briefLabels, attachmentHash(mergedCard), now);
+          await seen.add(dedupeKey, mention.url ?? "", now);
+          merged++;
+          results.push({ ...chBase, decision: "merged", reason: `folded into ${existing.slack_ts}` });
+        } else {
+          failed++;
+          results.push({ ...chBase, decision: "dropped", reason: `merge_failed:${upd.error ?? "unknown"}` });
+        }
+        continue;
+      }
+
+      // --- new story: post it ---
+      const r = await postToSlack(env, buildPostPayload(mention, brief, channel, now));
+      if (r.ok && r.ts) {
+        if (key) {
+          await stories.create({
+            key,
+            slackTs: r.ts,
+            channel,
+            briefLabel: brief.label,
+            briefLabels: [brief.label],
+            primary: mention,
+            outlets: [outletOf(mention)],
+            simhash: simhashStr,
+            mediaType: mention.mediaType,
+            renderHash: attachmentHash(blocks), // `blocks` is the attachment we just posted (buildPostPayload)
+            now,
+          });
+        }
         await seen.add(dedupeKey, mention.url ?? "", now);
-        merged++;
-        results.push({ ...base, decision: "merged", reason: `folded into ${existing.slack_ts}` });
+        posted++;
+        results.push({ ...chBase, decision: "posted", slackTs: r.ts });
       } else {
         failed++;
-        results.push({ ...base, decision: "dropped", reason: `merge_failed:${upd.error ?? "unknown"}` });
+        results.push({ ...chBase, decision: "dropped", reason: `slack_error:${r.error ?? "unknown"}` });
       }
-      continue;
-    }
-
-    // --- new story: post it ---
-    const r = await postToSlack(env, buildPostPayload(mention, brief, channel, now));
-    if (r.ok && r.ts) {
-      if (key) {
-        await stories.create({
-          key,
-          slackTs: r.ts,
-          channel,
-          briefLabel: brief.label,
-          briefLabels: [brief.label],
-          primary: mention,
-          outlets: [outletOf(mention)],
-          simhash: simhashStr,
-          mediaType: mention.mediaType,
-          renderHash: attachmentHash(blocks), // `blocks` is the attachment we just posted (buildPostPayload)
-          now,
-        });
-      }
-      await seen.add(dedupeKey, mention.url ?? "", now);
-      posted++;
-      results.push({ ...base, decision: "posted", slackTs: r.ts });
-    } else {
-      failed++;
-      results.push({ ...base, decision: "dropped", reason: `slack_error:${r.error ?? "unknown"}` });
     }
   }
 

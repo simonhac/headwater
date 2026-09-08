@@ -14,6 +14,10 @@ import { backfillStations } from "@/lib/backfill";
 import { listStationResolutions } from "@/lib/meltwater/stations";
 import { renderStationsPage } from "@/ui/stations";
 import { accessOk, checkBearer } from "@/lib/auth";
+import { configuredChannels, emptyRouting, loadRouting, parseRoutingForm, saveRouting } from "@/lib/routing";
+import { listBotChannels } from "@/lib/slack/channels";
+import { renderRoutingPage } from "@/ui/routing";
+import { feedConfig } from "@/config/feed.config";
 import { withRetry } from "@/lib/retry";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
@@ -96,11 +100,13 @@ app.get("/health", async (c) => {
   } catch {
     /* DB not migrated yet */
   }
-  // Format-validate the runtime env (never leaks values). Only the `configOk` boolean is public.
-  const config = summarizeConfig(validateConfig(c.env));
+  // Format-validate the runtime env + saved routing (never leaks values, and channel ids are
+  // treated as secret). Only the `configOk` boolean is public.
+  const routing = await loadRouting(c.env.DB).catch(() => emptyRouting());
+  const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-14", // bump on each deploy to confirm the running code
+    build: "headwater-15", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
@@ -111,6 +117,8 @@ app.get("/health", async (c) => {
       slackChannel: !!c.env.SLACK_DEFAULT_CHANNEL,
       accessConfigured: !!c.env.ACCESS_TEAM_DOMAIN && !!c.env.ACCESS_AUD,
     },
+    // How many distinct channels the feed fans out to (count only — ids are secret). 1 = default only.
+    channels: configuredChannels(routing, c.env).length,
   });
 });
 
@@ -334,6 +342,46 @@ app.get("/icons/media/v1/:name", (c) => {
     status: 200,
     headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=31536000, immutable" },
   });
+});
+
+// --- brief → channel routing (gated by Cloudflare Access). Under /inspect/* so it's covered by the
+// existing Access destination — no new Zero Trust config needed (see the /stations note above). ---
+/** Turn a `conversations.list` failure into something actionable on the page. */
+function channelListError(error: string): string {
+  if (error === "missing_scope")
+    return "Slack is missing the channels:read + groups:read scopes — add them under OAuth & Permissions, then Reinstall to workspace.";
+  if (error === "no_slack_token") return "SLACK_BOT_TOKEN is not configured.";
+  return `Slack error listing channels: ${error}`;
+}
+
+app.get("/inspect/routing", async (c) => {
+  if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
+  const [routing, list] = await Promise.all([loadRouting(c.env.DB), listBotChannels(c.env)]);
+  return c.html(
+    renderRoutingPage({
+      briefs: feedConfig.briefs,
+      channels: list.channels,
+      routing,
+      defaultChannel: c.env.SLACK_DEFAULT_CHANNEL ?? "",
+      flash: c.req.query("saved") ? "Routing saved." : undefined,
+      error: list.error ? channelListError(list.error) : undefined,
+    }),
+  );
+});
+
+app.post("/inspect/routing", async (c) => {
+  if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
+  // CSRF: Access authenticates the session cookie, which a cross-site form POST would also carry.
+  // `Sec-Fetch-Site` is set by every browser that can reach this page; absent = a non-browser client.
+  const site = c.req.header("sec-fetch-site");
+  if (site && site !== "same-origin") return c.text("forbidden", 403);
+
+  const list = await listBotChannels(c.env);
+  if (list.error) return c.text(`slack error: ${list.error}`, 502);
+  const briefIds = [...feedConfig.briefs.map((b) => b.id), "default"];
+  const body = (await c.req.parseBody({ all: true })) as Record<string, unknown>;
+  await saveRouting(c.env.DB, parseRoutingForm(body, briefIds, list.channels.map((ch) => ch.id)), Date.now());
+  return c.redirect("/inspect/routing?saved=1", 303);
 });
 
 app.get("/inspect", async (c) => {

@@ -24,12 +24,16 @@ window ends. This is exactly the "multiple postings of clearly the same intervie
 
 | Layer | Key | Catches | Code |
 |---|---|---|---|
-| Exact dedupe | `sha256(brief.id \| url ?? "source\|title")` | true re-delivery | `seen_mentions`, `src/lib/store/seen.ts` |
-| Title syndication | `sha256(normalizeTitle(title))` | verbatim wire republication | `stories.story_key`, `src/lib/story.ts` |
+| Exact dedupe | `sha256(brief.id \| channel \| url ?? "source\|title")` | true re-delivery | `seen_mentions`, `src/lib/store/seen.ts` |
+| Title syndication | `channel \| sha256(normalizeTitle(title))` | verbatim wire republication | `stories.story_key`, `src/lib/story.ts` |
 | **Broadcast phrase near-dup** | **shared verbatim phrase** | **same reading, different ASR/window** | `src/lib/nearmatch.ts`, `src/lib/process.ts` |
 
 Layers 1–2 run first (cheap, exact). Only broadcast media (`radio`/`tv`/…) that survives both
 reaches layer 3.
+
+**Every layer is channel-scoped.** A brief can fan out to several Slack channels (`/inspect/routing`),
+and each channel gets its own message — so the same headline in two channels is two stories, and a
+near-dup can only ever fold into a card that lives in the channel being posted to.
 
 ## The techniques, from scratch
 

@@ -10,6 +10,7 @@
  */
 import type { Env } from "@/env";
 import { deleteSlack } from "@/lib/slack/post";
+import { configuredChannels, loadRouting } from "@/lib/routing";
 
 export interface OrphanSample {
   ts: string;
@@ -18,8 +19,9 @@ export interface OrphanSample {
 
 export interface OrphanResult {
   dryRun: boolean;
-  channel: string;
-  scanned: number; // bot card messages seen in the channel
+  /** Every channel scanned — the default plus every channel a brief is routed to. */
+  channels: string[];
+  scanned: number; // bot card messages seen, summed across every scanned channel
   stories: number; // story rows (valid ts) loaded from D1
   orphans: number; // bot cards with no backing story
   deleted: number; // orphans removed (0 on dryRun)
@@ -34,10 +36,12 @@ export interface OrphanResult {
 const MAX_DELETES_PER_CALL = 40;
 const MAX_SAMPLES = 200;
 
-/** Every valid story message ts (across channels) — the allow-list an orphan is NOT in. */
+/** Every valid story message, keyed `"<channel>|<slack_ts>"` — the allow-list an orphan is NOT in.
+ * Channel-qualified: with fanout the same headline is two messages in two channels, and a bare-ts
+ * allow-list would let a genuine orphan in channel B be spared by its live twin in channel A. */
 async function loadStoryTs(env: Env): Promise<Set<string>> {
-  const res = await env.DB.prepare("SELECT slack_ts FROM stories").all<{ slack_ts: string }>();
-  return new Set((res.results ?? []).map((r) => r.slack_ts));
+  const res = await env.DB.prepare("SELECT channel, slack_ts FROM stories").all<{ channel: string; slack_ts: string }>();
+  return new Set((res.results ?? []).map((r) => `${r.channel}|${r.slack_ts}`));
 }
 
 interface HistoryMessage {
@@ -50,10 +54,11 @@ interface HistoryMessage {
 }
 
 export async function sweepOrphans(env: Env, opts: { dryRun: boolean }): Promise<OrphanResult> {
-  const channel = env.SLACK_DEFAULT_CHANNEL ?? "";
+  const routing = await loadRouting(env.DB);
+  const channels = configuredChannels(routing, env);
   const res: OrphanResult = {
     dryRun: opts.dryRun,
-    channel,
+    channels,
     scanned: 0,
     stories: 0,
     orphans: 0,
@@ -62,7 +67,7 @@ export async function sweepOrphans(env: Env, opts: { dryRun: boolean }): Promise
     remaining: 0,
     samples: [],
   };
-  if (!env.SLACK_BOT_TOKEN || !channel) {
+  if (!env.SLACK_BOT_TOKEN || !channels.length) {
     res.note = "no_token_or_channel";
     return res;
   }
@@ -70,6 +75,20 @@ export async function sweepOrphans(env: Env, opts: { dryRun: boolean }): Promise
   const valid = await loadStoryTs(env);
   res.stories = valid.size;
 
+  // Totals (and the delete cap) are pooled across channels; `note` records the first channel that
+  // errored, so one broken channel doesn't hide the rest of the sweep.
+  for (const channel of channels) await sweepChannel(env, channel, valid, opts, res);
+  return res;
+}
+
+/** Scan one channel's history, accumulating into the shared `res`. */
+async function sweepChannel(
+  env: Env,
+  channel: string,
+  valid: Set<string>,
+  opts: { dryRun: boolean },
+  res: OrphanResult,
+): Promise<void> {
   let cursor: string | undefined;
   for (let page = 0; page < 30; page++) {
     const params = new URLSearchParams({ channel, limit: "200" });
@@ -81,7 +100,7 @@ export async function sweepOrphans(env: Env, opts: { dryRun: boolean }): Promise
       | { ok?: boolean; error?: string; messages?: HistoryMessage[]; response_metadata?: { next_cursor?: string } }
       | null;
     if (!data?.ok) {
-      res.note = `history:${data?.error ?? "unknown"}`;
+      res.note ??= `history:${data?.error ?? "unknown"}`;
       break;
     }
     for (const m of data.messages ?? []) {
@@ -90,7 +109,7 @@ export async function sweepOrphans(env: Env, opts: { dryRun: boolean }): Promise
       const isBotCard = !!(m.bot_id || m.app_id || m.subtype === "bot_message") && (m.attachments?.length ?? 0) > 0;
       if (!isBotCard) continue;
       res.scanned++;
-      if (valid.has(m.ts)) continue; // has a backing story → keep
+      if (valid.has(`${channel}|${m.ts}`)) continue; // has a backing story in THIS channel → keep
       res.orphans++;
       if (res.samples.length < MAX_SAMPLES) {
         const a = m.attachments?.[0];
@@ -109,5 +128,4 @@ export async function sweepOrphans(env: Env, opts: { dryRun: boolean }): Promise
     cursor = data.response_metadata?.next_cursor || undefined;
     if (!cursor) break;
   }
-  return res;
 }

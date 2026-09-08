@@ -53,6 +53,8 @@ function dbgPanel(ev: WebhookEventRecord, summary: ProcessSummary | null, r: Doc
   if (r) bits.push(decisionPill(r.decision));
   else bits.push(decisionPill(ev.decision));
   if (r?.brief) bits.push(`<span>brief: ${escHtml(r.brief)}</span>`);
+  // Present once a mention fans out to more than one channel; absent on pre-fanout archived summaries.
+  if (r?.channel) bits.push(`<span>channel: ${escHtml(r.channel)}</span>`);
   if (r?.slackTs) bits.push(`<span>ts ${escHtml(r.slackTs)}</span>`);
   bits.push(`<span class="dbg-time">${escHtml(fmtTime(ev.received_at))}</span>`);
   if (summary) bits.push(`<span>${escHtml(statLine(summary))}</span>`);
@@ -163,7 +165,7 @@ export function renderInspectPage(events: WebhookEventRecord[], keyQS: string, p
 <style>${INSPECT_CSS}</style></head><body>
 <header class="topbar">
   <h1>Headwater — webhook feed</h1>
-  <nav>${filterNav}<a href="${refreshHref}">↻ refresh</a> · <a href="/inspect/stations">stations</a> · <a href="${rawHref}">raw JSON</a></nav>
+  <nav>${filterNav}<a href="${refreshHref}">↻ refresh</a> · <a href="/inspect/stations">stations</a> · <a href="/inspect/routing">routing</a> · <a href="${rawHref}">raw JSON</a></nav>
 </header>
 <main class="stream">${stream}</main>
 <script>

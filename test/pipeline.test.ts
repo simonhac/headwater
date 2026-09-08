@@ -261,9 +261,17 @@ describe("icons", () => {
 describe("syndication", () => {
   it("normalizes titles so verbatim republications share a key", async () => {
     expect(normalizeTitle("Zero chance: Nats & Libs!")).toBe("zero chance nats libs");
-    const a = await storyKey("Zero chance: Nats & Libs!");
-    const b = await storyKey("zero chance   nats  libs");
+    const a = await storyKey("C1", "Zero chance: Nats & Libs!");
+    const b = await storyKey("C1", "zero chance   nats  libs");
     expect(a).toBe(b);
+  });
+
+  it("scopes the story key to the channel, so a fanned-out headline is two stories", async () => {
+    const a = await storyKey("C1", "Zero chance");
+    const b = await storyKey("C2", "Zero chance");
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^C1\|[0-9a-f]{64}$/);
+    expect(b).toBe(`C2|${a.slice("C1|".length)}`); // same hash, different prefix
   });
 
   it("addOutlet de-dupes by url or name", () => {

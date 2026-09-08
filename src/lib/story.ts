@@ -46,8 +46,11 @@ export function normalizeTitle(title: string): string {
     .trim();
 }
 
-export async function storyKey(title: string): Promise<string> {
-  return sha256Hex(normalizeTitle(title));
+/** Story identity, scoped to the channel it was posted in: `"<channel>|<sha256(normalized title)>"`.
+ * The same headline fanned out to two channels is two stories with two Slack messages — folding them
+ * would mean one card living in one channel only. Migration 0010 re-keyed the legacy bare-hash rows. */
+export async function storyKey(channel: string, title: string): Promise<string> {
+  return `${channel}|${await sha256Hex(normalizeTitle(title))}`;
 }
 
 /** Build the stored Outlet for a mention, capturing the display fields so a high-reach outlet can lead
@@ -150,12 +153,14 @@ export class StoryStore {
       .run();
   }
 
-  /** Recent stories that carry a SimHash (broadcast), for near-duplicate lookup. Oldest-first so a
-   * tie among equally-good matches folds into the ORIGINAL card (stable under replay/reconcile). */
-  async recentWithSimhash(sinceMs: number): Promise<StoryRow[]> {
+  /** Recent stories in ONE channel that carry a SimHash (broadcast), for near-duplicate lookup.
+   * Channel-scoped for the same reason as `storyKey`: a near-dup can only fold into a card that
+   * lives in the channel we're about to post to. Oldest-first so a tie among equally-good matches
+   * folds into the ORIGINAL card (stable under replay/reconcile). */
+  async recentWithSimhash(sinceMs: number, channel: string): Promise<StoryRow[]> {
     const res = await this.db
-      .prepare(`SELECT * FROM stories WHERE simhash IS NOT NULL AND updated_at >= ? ORDER BY created_at ASC`)
-      .bind(sinceMs)
+      .prepare(`SELECT * FROM stories WHERE simhash IS NOT NULL AND updated_at >= ? AND channel = ? ORDER BY created_at ASC`)
+      .bind(sinceMs, channel)
       .all<StoryRow>();
     return res.results ?? [];
   }

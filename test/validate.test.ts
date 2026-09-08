@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Env } from "@/env";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
+import type { Routing } from "@/lib/routing";
 
 // A fully valid env with DUMMY values (never real secrets). validateConfig only reads string
 // fields, so DB can be a stub.
@@ -58,6 +59,33 @@ describe("validateConfig", () => {
     const env = mkEnv({ POSTING_ENABLED: "TRUE" });
     expect(issue(env, "POSTING_ENABLED")?.severity).toBe("warn");
     expect(summarizeConfig(validateConfig(env)).ok).toBe(true);
+  });
+
+  it("accepts a well-formed routing and flags a malformed channel id", () => {
+    const good: Routing = { v: 1, briefs: { mps: ["C0TEST000AA", "#vic-2026"] }, updatedAt: 1 };
+    expect(summarizeConfig(validateConfig(mkEnv(), good)).ok).toBe(true);
+    const bad: Routing = { v: 1, briefs: { mps: ["general"] }, updatedAt: 1 };
+    const i = summarizeConfig(validateConfig(mkEnv(), bad)).issues.find((x) => x.name === "routing");
+    expect(i?.severity).toBe("error");
+    expect(i?.detail).toContain("mps");
+  });
+
+  it("warns (without failing configOk) on a routed brief that no longer exists", () => {
+    const stale: Routing = { v: 1, briefs: { "ghost-brief": ["C0TEST000AA"] }, updatedAt: 1 };
+    const sum = summarizeConfig(validateConfig(mkEnv(), stale));
+    expect(sum.ok).toBe(true);
+    expect(sum.issues.find((x) => x.name === "routing.briefs")?.severity).toBe("warn");
+  });
+
+  it("routes the synthesized 'default' brief without warning", () => {
+    const r: Routing = { v: 1, briefs: { default: ["C0TEST000AA"] }, updatedAt: 1 };
+    expect(summarizeConfig(validateConfig(mkEnv(), r)).issues).toHaveLength(0);
+  });
+
+  it("never echoes a channel id from the routing (they are treated as secret)", () => {
+    const r: Routing = { v: 1, briefs: { mps: ["not-a-channel-id"] }, updatedAt: 1 };
+    const serialized = JSON.stringify(summarizeConfig(validateConfig(mkEnv(), r)));
+    expect(serialized).not.toContain("not-a-channel-id");
   });
 
   it("never leaks a secret value in the summary", () => {

@@ -3,11 +3,12 @@ import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
 import { deleteSlack } from "@/lib/slack/post";
 import { processEvent } from "@/lib/process";
+import { configuredChannels, loadRouting } from "@/lib/routing";
 
 export interface ReplayResult {
   reset: boolean;
-  purged: number; // old bot messages deleted from the channel
-  purgeNote?: string; // why the purge stopped (e.g. a Slack error like "missing_scope")
+  purged: number; // old bot messages deleted, summed across every configured channel
+  purgeNote?: string; // per-channel outcome/why the purge stopped (e.g. a Slack error like "missing_scope")
   events: number; // real events reprocessed
   skipped: number; // synthetic/unparseable events skipped
   posted: number;
@@ -64,9 +65,15 @@ export async function replayArchivedEvents(
   const res: ReplayResult = { reset: !!opts.reset, purged: 0, events: 0, skipped: 0, posted: 0, merged: 0, failed: 0, errors: 0 };
 
   if (opts.purge || opts.purgeOnly) {
-    const p = await purgeBotMessages(env, env.SLACK_DEFAULT_CHANNEL ?? "");
-    res.purged = p.deleted;
-    res.purgeNote = p.note;
+    // Purge EVERY channel a brief can be routed to, not just the default — otherwise a rebuild
+    // repopulates the fanout channels on top of the cards already there.
+    const notes: string[] = [];
+    for (const channel of configuredChannels(await loadRouting(db), env)) {
+      const p = await purgeBotMessages(env, channel);
+      res.purged += p.deleted;
+      if (p.note) notes.push(`${channel}: ${p.note}`);
+    }
+    res.purgeNote = notes.join("; ") || undefined;
   }
   if (opts.purgeOnly) return res; // purge without reposting (re-runnable until the channel is clear)
 

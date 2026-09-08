@@ -77,7 +77,7 @@ Edit `src/config/feed.config.ts`. Start lenient, watch `/inspect` on real traffi
 - `minSourceReach` — drop small outlets ("major sources only")
 - `includeMediaTypes` / `excludeMediaTypes` — kill radio/social/blog noise (set once you see the real values in `/inspect`)
 - `sourceAllowlist` / `sourceBlocklist`, `allowedCountryCodes`
-- `briefs[]` — each brief's `label` (the "Organisation Brief"), `keywords` (highlighted + counted), and optional `matchNames`/`channel`
+- `briefs[]` — each brief's `label` (the "Organisation Brief"), `keywords` (highlighted + counted), and optional `matchNames`. Which Slack channel(s) a brief posts to is **not** in this file — it's edited at `/inspect/routing` (see below)
 - `nearDuplicate` — broadcast shared-phrase merge thresholds (SimHash Hamming, phrase overlap, verbatim-run length, air-time gap, media types); see [Deduplication](#deduplication)
 
 > The Generic Webhook payload schema isn't publicly documented, so `src/lib/meltwater/parse.ts`
@@ -244,10 +244,27 @@ known-correct URL).
 > naming never blocks delivery — it only affects labeling.
 
 ## Wire up Slack
-1. Create a Slack app → add bot scope `chat:write` (optionally `chat:write.public`) → install → copy the `xoxb-…` token.
-2. Create the channel and `/invite` the bot.
+1. Create a Slack app → add bot scopes `chat:write` (optionally `chat:write.public`) plus
+   `channels:read` and `groups:read` (the channel picker on `/inspect/routing` calls
+   `conversations.list` over public + private channels) → install → copy the `xoxb-…` token.
+2. Create the channel and `/invite` the bot. The picker only offers channels the bot is a member of.
 3. `wrangler secret put SLACK_BOT_TOKEN` and `SLACK_DEFAULT_CHANNEL` (the channel id, e.g. `C0123ABCD`).
 4. Set `"POSTING_ENABLED": "true"` in `wrangler.jsonc` and `pnpm run deploy`.
+
+> Adding `channels:read`/`groups:read` to an already-installed app needs **Reinstall to workspace**
+> (OAuth & Permissions). Until then `/inspect/routing` shows a `missing_scope` notice instead of the
+> channel columns; posting is unaffected.
+
+### Routing briefs to channels — `/inspect/routing`
+Each brief fans out to one or more Slack channels. The matrix (rows = briefs, columns = the channels
+the bot is in) is stored in D1 (`ops_state.routing`), so changing it needs **no redeploy** and no
+channel id ever enters this repo. A brief with nothing ticked posts to `SLACK_DEFAULT_CHANNEL`, which
+is what every brief did before routing existed — an empty matrix is the old single-channel behaviour.
+
+Fanout is **per channel all the way down**: `stories.story_key` is `"<channel>|<sha256(title)>"`, so
+the same headline routed to two channels is two independent cards that merge and coalesce separately.
+`/health` reports `channels` (a count only). Migration `0010_stories_channel_key.sql` re-keys
+pre-fanout rows in place and is idempotent.
 
 ## Monitoring
 Two guardrails exist because a webhook-secret mismatch (or a stalled upstream) can silence the feed
