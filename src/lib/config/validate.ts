@@ -109,8 +109,79 @@ export function validateConfig(env: Env, routing?: Routing): ConfigCheck[] {
     }
   }
 
+  checks.push(...digestChecks(env));
+
   return checks;
 }
+
+/** Deliberately loose: enough to catch a name or a URL pasted into an address field. */
+const EMAIL_ISH = /^[^\s@]+@[^\s@.]+\.[^\s@]+$/;
+
+/**
+ * Daily digest email config. These are only *errors* when DIGEST_ENABLED is "true" — an unconfigured
+ * digest must not flip `/health`'s `configOk` false and mask a real problem in the ingestion
+ * pipeline, which runs perfectly well without any of this.
+ */
+function digestChecks(env: Env): ConfigCheck[] {
+  const de = env.DIGEST_ENABLED;
+  const on = de === "true";
+  const sev: "error" | "warn" = on ? "error" : "warn";
+  const checks: ConfigCheck[] = [
+    {
+      name: "DIGEST_ENABLED",
+      ok: de === undefined || de === "true" || de === "false",
+      severity: "warn",
+      detail:
+        de === undefined || de === "true" || de === "false"
+          ? undefined
+          : `is ${JSON.stringify(de)}; only the exact string "true" enables the daily send`,
+    },
+  ];
+
+  // Below here: only worth reporting once someone has started configuring the digest.
+  if (!on && !env.RESEND_API_KEY && !env.DIGEST_FROM && !env.DIGEST_TO) return checks;
+
+  // Resend keys are `re_…`. The common mistakes are pasting a Cloudflare token or a dashboard URL.
+  const key = env.RESEND_API_KEY;
+  checks.push({
+    name: "RESEND_API_KEY",
+    ok: !!key && key.startsWith("re_") && key.length >= 20,
+    severity: sev,
+    detail: !key
+      ? "missing"
+      : !key.startsWith("re_")
+        ? "expected a Resend API key starting with 're_'"
+        : key.length < 20
+          ? "implausibly short for a Resend API key"
+          : undefined,
+  });
+
+  // The sending domain must be verified in Resend. A well-formed address on an UNVERIFIED domain is
+  // the likeliest failure here, and it can only be caught at send time — so this checks shape only.
+  const from = env.DIGEST_FROM;
+  checks.push({
+    name: "DIGEST_FROM",
+    ok: !!from && EMAIL_ISH.test(from),
+    severity: sev,
+    detail: !from ? "missing" : EMAIL_ISH.test(from) ? undefined : "expected a bare email address on a Resend-verified domain",
+  });
+
+  const to = env.DIGEST_TO;
+  const recipients = (to ?? "").split(/[,\s]+/).filter((s) => s.includes("@"));
+  checks.push({
+    name: "DIGEST_TO",
+    ok: recipients.length > 0 && recipients.every((r) => EMAIL_ISH.test(r)),
+    severity: sev,
+    detail: !to ? "missing" : recipients.length === 0 ? "no address containing '@'" : recipients.every((r) => EMAIL_ISH.test(r)) ? undefined : "one or more recipients are not valid addresses",
+  });
+
+  if (env.DIGEST_REPLY_TO && !EMAIL_ISH.test(env.DIGEST_REPLY_TO)) {
+    checks.push({ name: "DIGEST_REPLY_TO", ok: false, severity: "warn", detail: "not a valid email address" });
+  }
+
+  return checks;
+}
+
 
 /** Roll checks into a public-safe summary: `ok` is false iff any error-severity check failed. */
 export function summarizeConfig(checks: ConfigCheck[]): {

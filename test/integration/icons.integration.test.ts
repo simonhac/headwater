@@ -6,7 +6,7 @@ import worker from "@/index";
 // unauthenticated for the attachment `footer_icon`), so no Cloudflare Access header is passed here —
 // a 200 confirms the route is NOT behind the Access gate.
 const ctx = () => ({ waitUntil() {}, passThroughOnException() {} }) as unknown as ExecutionContext;
-const get = (path: string) => worker.fetch(new Request(`https://feed.moofer.com${path}`), env, ctx());
+const get = (path: string) => worker.fetch(new Request(`https://worker.test${path}`), env, ctx());
 
 describe("GET /icons/media/v1/:name (public media-type footer icons)", () => {
   it("serves a PNG with an immutable long cache, un-gated", async () => {

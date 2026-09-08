@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Headwater — weekly media digest (tile mock)</title>
+<!--
+  ============================================================================
+  Headwater weekly digest — STATIC DESIGN MOCK. Not wired to any data source.
+  ============================================================================
+
+  WHY THIS EXISTS
+  Meltwater's own generated newsletter renders broadcast titles raw ("NewsRadio
+  Drive - Fri, 12 Jun 2026 16:50:56 +1000"), repeats the same story 3-4x across
+  syndicating outlets, bolds the entire snippet so nothing reads as emphasis,
+  prints "No engagement data available" noise, and links only to the Meltwater
+  tracker. Headwater already fixes every one of those for Slack and /inspect.
+  This is what the digest looks like in the Headwater/Streem card look.
+
+  HARD CONSTRAINT (what makes this mock useful later)
+  Every tile below is expressible from the EXISTING SlackAttachment fields
+  alone -- color, author_icon, author_name, author_link, title, title_link,
+  text, footer, footer_icon -- as produced by buildStoryAttachment() in
+  src/lib/slack/format.ts. No new data plumbing. The follow-up is a
+  renderEmailTile(att) sibling of renderCardBody() in src/ui/card.ts.
+
+  STRING FORMATS mirrored verbatim from the code:
+    author_name   "Yahoo News Australia + 2 others - P. Adeyemi"  (always plural
+                  "others"; byline separated by an em dash)      format.ts:243-297
+    title         cleanTitle() strips the broadcast air-date tail. When the
+                  title equals the masthead the title key is ABSENT and the URL
+                  moves to author_link -- see tile 7.            format.ts:147,201-206
+    text          keyword pills are single backticks -> <code>;  format.ts:213-236
+                  optional " (also mentions `kw`)" suffix;       highlight.ts:24-30
+                  trailing offsite link is "<url|U+2197 U+FE0E>".
+                  Snippet-less mentions instead get
+                  "Mentions: `MP (3)`, `independent (1)`" -- see tile 8.
+    footer        bits joined by TWO SPACES + MIDDLE DOT + TWO SPACES:
+                  "Thu, 11 Jun 2026, 6:02am AEST  .  Brief: Energy Policy [emoji]
+                   .  5M reach"                                  format.ts:246-292
+                  merged variant lowercases the per-outlet reach:
+                  "3 outlets with 1.1M combined reach: Yahoo News Australia
+                   (513k) . The Saturday Paper (353k) . inkl (250k)"
+    reach         compactReach(): >=1M -> 1dp + M; >=1K -> 0dp at >=100k else
+                  1dp, + K; trailing ".0" stripped.              format.ts:123-128
+    color         Transport #4263eb, Regional Health #0ca678, Brief colours (illustrative):
+                  and per-brief colours come from feed.config.ts; default #868e96.
+
+  VISUAL TOKENS are the light-mode values of src/ui/inspect.styles.ts, inlined:
+    page #f8f8f8, surface #fff, text #1d1c1d, muted #616061, link #1264a3,
+    hair rgba(29,28,29,.13), hair-soft rgba(29,28,29,.08),
+    pill fg rgb(192,19,67) on rgba(29,28,29,.04).
+
+  EMAIL SAFETY
+    Nested tables, all styles inline, 640px max width, absolute https images.
+    No flex, no grid, no ::before, no CSS custom properties, no
+    prefers-color-scheme. The card's left colour bar is a position:absolute
+    ::before in inspect.styles.ts -- Gmail and Outlook strip that -- so here it
+    is a border-left on the inner td. The single <style> block below carries
+    only a max-width rule for narrow viewports and is inert in Outlook.
+
+  IMAGES
+    author_icon  https://www.google.com/s2/favicons?sz=64&domain=<host>
+    footer_icon  https://<your-host>/icons/media/v1/{radio,tv,globe,
+                 message-circle,newspaper}.png   (the ?v= cache-buster is
+                 dropped here; the route ignores it)
+    If a client blocks remote images, icons.ts:45-55 already has the text
+    fallback map (radio 'radio emoji', tv 'tv emoji', online 'globe', social
+    'speech bubble', print 'newspaper').
+
+  ILLUSTRATIVE
+    Headlines, outlets and reach figures are real, taken from the 17 June 2026
+    "Weekly Update" newsletter. Timestamps, article URLs, section counts and
+    section totals are made up to exercise the layout.
+
+  POSSIBLE EMAIL-ONLY UPGRADE
+    Sentiment is kept as the Slack emoji for parity with the Slack card. A
+    coloured dot (neutral #646464 / negative #FF4545, as Meltwater does it)
+    would read better in email if we ever decide the two surfaces may diverge.
+-->
+<style>
+  /* Only rule in the document; everything else is inline. */
+  @media only screen and (max-width: 660px) {
+    .hw-shell { width: 100% !important; }
+  }
+</style>
+</head>
+<body style="margin:0; padding:0; background:#f8f8f8;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8f8f8; margin:0; padding:0;">
+<tr>
+<td align="center" style="padding:24px 12px 40px 12px;">
+
+<table role="presentation" class="hw-shell" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px; max-width:640px; font:15px/1.46668 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#1d1c1d;">
+
+  <!-- ================= Header ================= -->
+  <tr><td style="padding:0 2px 14px 2px;">
+    <div style="font-size:15px; font-weight:900; color:#1d1c1d; letter-spacing:-0.1px;">Headwater &mdash; weekly media digest</div>
+    <div style="font-size:13px; line-height:18px; color:#616061; margin-top:2px;">Wed 10 &ndash; Wed 17 June 2026 &nbsp;&middot;&nbsp; 45 stories &nbsp;&middot;&nbsp; 4 briefs</div>
+  </td></tr>
+
+  <!-- ================= Section: Energy Policy ================= -->
+  <tr><td style="padding:12px 2px 0 2px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td width="10" valign="middle" style="width:10px; padding:0 8px 0 0;">
+          <div style="width:10px; height:10px; background:#f76707; border-radius:2px; font-size:0; line-height:0;">&nbsp;</div>
+        </td>
+        <td valign="middle" style="font-size:13px; line-height:18px; color:#1d1c1d;">
+          <span style="font-weight:700; letter-spacing:0.4px;">ENERGY POLICY</span>
+          <span style="color:#616061; font-weight:400;">&nbsp;&middot;&nbsp;18 stories&nbsp;&middot;&nbsp;9.4M combined reach</span>
+        </td>
+      </tr>
+    </table>
+    <div style="height:1px; background:rgba(29,28,29,0.13); font-size:0; line-height:0; margin:8px 0 6px 0;">&nbsp;</div>
+  </td></tr>
+
+  <!-- ---- Tile 1: plain online story, direct publisher link ---- -->
+  <tr><td style="padding:6px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid rgba(29,28,29,0.08);">
+      <tr><td style="border-left:4px solid #f76707; padding:10px 14px 12px 14px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:3px;">
+          <tr>
+            <td width="18" valign="middle" style="width:18px; padding-right:8px;">
+              <img src="https://www.google.com/s2/favicons?sz=64&amp;domain=smh.com.au" width="18" height="18" alt="" style="display:block; width:18px; height:18px; border:0; border-radius:3px;">
+            </td>
+            <td valign="middle" style="font-size:15px; font-weight:700; color:#1d1c1d;">The Sydney Morning Herald &mdash; J. Marsh</td>
+          </tr>
+        </table>
+
+        <div style="margin:2px 0 4px 0;">
+          <a href="https://app.meltwater.com/mm/redirect/c2ea9f10" style="font-size:15px; font-weight:700; color:#1264a3; text-decoration:none;">Advocacy body launches with cross-bench backing</a>
+        </div>
+
+        <div style="font-size:15px; line-height:22px; color:#1d1c1d; margin:2px 0 8px 0;">
+          The new body will be chaired by a former regulator, backed by <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">Energy Policy</code> grants, with a remit covering network upgrades in outer suburbs.
+          <a href="https://www.smh.com.au/politics/federal/brittany-higgins-returns-20260611.html" style="color:#1264a3; text-decoration:none;">&#x2197;&#xFE0E;</a>
+        </div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">
+          <tr>
+            <td width="14" valign="top" style="width:14px; padding-right:6px;">
+              <img src="https://<your-host>/icons/media/v1/globe.png" width="14" height="18" alt="" style="display:block; width:14px; height:18px; border:0;">
+            </td>
+            <td valign="top" style="font-size:13px; line-height:18px; color:#616061;">Thu, 11 Jun 2026, 6:02am AEST&nbsp;&nbsp;&middot;&nbsp;&nbsp;Brief: Energy Policy &#128528;&nbsp;&nbsp;&middot;&nbsp;&nbsp;5M reach</td>
+          </tr>
+        </table>
+
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ---- Tile 2: MERGED story. Meltwater lists this 3x; we fold it. ---- -->
+  <tr><td style="padding:6px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid rgba(29,28,29,0.08);">
+      <tr><td style="border-left:4px solid #f76707; padding:10px 14px 12px 14px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:3px;">
+          <tr>
+            <td width="18" valign="middle" style="width:18px; padding-right:8px;">
+              <img src="https://www.google.com/s2/favicons?sz=64&amp;domain=au.news.yahoo.com" width="18" height="18" alt="" style="display:block; width:18px; height:18px; border:0; border-radius:3px;">
+            </td>
+            <td valign="middle" style="font-size:15px; font-weight:700; color:#1d1c1d;">Yahoo News Australia + 2 others &mdash; P. Adeyemi</td>
+          </tr>
+        </table>
+
+        <div style="margin:2px 0 4px 0;">
+          <a href="https://app.meltwater.com/mm/redirect/8b31d40a" style="font-size:15px; font-weight:700; color:#1264a3; text-decoration:none;">Minor parties set to receive record public funding</a>
+        </div>
+
+        <div style="font-size:15px; line-height:22px; color:#1d1c1d; margin:2px 0 8px 0;">
+          Funding reforms passed with bipartisan support will hand smaller parties record payments, a shift <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">Energy Policy</code> analysts warn entrenches incumbents.
+          <a href="https://au.news.yahoo.com/one-nation-set-pocket-200m-192041.html" style="color:#1264a3; text-decoration:none;">&#x2197;&#xFE0E;</a>
+        </div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">
+          <tr>
+            <td width="14" valign="top" style="width:14px; padding-right:6px;">
+              <img src="https://<your-host>/icons/media/v1/globe.png" width="14" height="18" alt="" style="display:block; width:14px; height:18px; border:0;">
+            </td>
+            <td valign="top" style="font-size:13px; line-height:18px; color:#616061;">Thu, 11 Jun 2026, 5:20am AEST&nbsp;&nbsp;&middot;&nbsp;&nbsp;Brief: Energy Policy &#128528;&nbsp;&nbsp;&middot;&nbsp;&nbsp;3 outlets with 1.1M combined reach: Yahoo News Australia (513k) &middot; The Saturday Paper (353k) &middot; inkl (250k)</td>
+          </tr>
+        </table>
+
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ---- Tile 3: radio. cleanTitle() stripped " - Fri, 12 Jun 2026 16:50:56 +1000";
+                   broadcastAirtime() put it in the footer. No offsite link. ---- -->
+  <tr><td style="padding:6px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid rgba(29,28,29,0.08);">
+      <tr><td style="border-left:4px solid #f76707; padding:10px 14px 12px 14px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:3px;">
+          <tr>
+            <td width="18" valign="middle" style="width:18px; padding-right:8px;">
+              <img src="https://www.google.com/s2/favicons?sz=64&amp;domain=abc.net.au" width="18" height="18" alt="" style="display:block; width:18px; height:18px; border:0; border-radius:3px;">
+            </td>
+            <td valign="middle" style="font-size:15px; font-weight:700; color:#1d1c1d;">ABC NewsRadio</td>
+          </tr>
+        </table>
+
+        <div style="margin:2px 0 4px 0;">
+          <a href="https://app.meltwater.com/mm/redirect/4417cc61" style="font-size:15px; font-weight:700; color:#1264a3; text-decoration:none;">Drive Program</a>
+        </div>
+
+        <div style="font-size:15px; line-height:22px; color:#1d1c1d; margin:2px 0 8px 0;">
+          &hellip; the question of who funds the upgrades keeps coming back to <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">Energy Policy</code>, and the minister was asked about it again this afternoon &hellip;
+        </div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">
+          <tr>
+            <td width="14" valign="top" style="width:14px; padding-right:6px;">
+              <img src="https://<your-host>/icons/media/v1/radio.png" width="14" height="18" alt="" style="display:block; width:14px; height:18px; border:0;">
+            </td>
+            <td valign="top" style="font-size:13px; line-height:18px; color:#616061;">Fri, 12 Jun 2026, 4:50pm AEST&nbsp;&nbsp;&middot;&nbsp;&nbsp;Brief: Energy Policy &#128528;&nbsp;&nbsp;&middot;&nbsp;&nbsp;616K reach</td>
+          </tr>
+        </table>
+
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ---- Tile 4: print, negative sentiment, "(also mentions ...)" suffix ---- -->
+  <tr><td style="padding:6px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid rgba(29,28,29,0.08);">
+      <tr><td style="border-left:4px solid #f76707; padding:10px 14px 12px 14px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:3px;">
+          <tr>
+            <td width="18" valign="middle" style="width:18px; padding-right:8px;">
+              <img src="https://www.google.com/s2/favicons?sz=64&amp;domain=heraldsun.com.au" width="18" height="18" alt="" style="display:block; width:18px; height:18px; border:0; border-radius:3px;">
+            </td>
+            <td valign="middle" style="font-size:15px; font-weight:700; color:#1d1c1d;">The Herald Sun (Print) &mdash; K. Okonkwo</td>
+          </tr>
+        </table>
+
+        <div style="margin:2px 0 4px 0;">
+          <a href="https://app.meltwater.com/mm/redirect/d90e6b77" style="font-size:15px; font-weight:700; color:#1264a3; text-decoration:none;">WHO REALLY PAYS FOR THE UPGRADE</a>
+        </div>
+
+        <div style="font-size:15px; line-height:22px; color:#1d1c1d; margin:2px 0 8px 0;">
+          Every connection point carries a cost, and the bill for the rollout has just landed on the ratepayer&rsquo;s desk.
+          (also mentions <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">Energy Policy</code>)</div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">
+          <tr>
+            <td width="14" valign="top" style="width:14px; padding-right:6px;">
+              <img src="https://<your-host>/icons/media/v1/newspaper.png" width="14" height="18" alt="" style="display:block; width:14px; height:18px; border:0;">
+            </td>
+            <td valign="top" style="font-size:13px; line-height:18px; color:#616061;">Mon, 15 Jun 2026, 5:00am AEST&nbsp;&nbsp;&middot;&nbsp;&nbsp;Brief: Energy Policy &#128078;&nbsp;&nbsp;&middot;&nbsp;&nbsp;513K reach</td>
+          </tr>
+        </table>
+
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ================= Section: Regional Health ================= -->
+  <tr><td style="padding:18px 2px 0 2px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td width="10" valign="middle" style="width:10px; padding:0 8px 0 0;">
+          <div style="width:10px; height:10px; background:#0ca678; border-radius:2px; font-size:0; line-height:0;">&nbsp;</div>
+        </td>
+        <td valign="middle" style="font-size:13px; line-height:18px; color:#1d1c1d;">
+          <span style="font-weight:700; letter-spacing:0.4px;">REGIONAL HEALTH</span>
+          <span style="color:#616061; font-weight:400;">&nbsp;&middot;&nbsp;14 stories&nbsp;&middot;&nbsp;6.1M combined reach</span>
+        </td>
+      </tr>
+    </table>
+    <div style="height:1px; background:rgba(29,28,29,0.13); font-size:0; line-height:0; margin:8px 0 6px 0;">&nbsp;</div>
+  </td></tr>
+
+  <!-- ---- Tile 5: two pills, two briefs in the footer ---- -->
+  <tr><td style="padding:6px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid rgba(29,28,29,0.08);">
+      <tr><td style="border-left:4px solid #0ca678; padding:10px 14px 12px 14px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:3px;">
+          <tr>
+            <td width="18" valign="middle" style="width:18px; padding-right:8px;">
+              <img src="https://www.google.com/s2/favicons?sz=64&amp;domain=abc.net.au" width="18" height="18" alt="" style="display:block; width:18px; height:18px; border:0; border-radius:3px;">
+            </td>
+            <td valign="middle" style="font-size:15px; font-weight:700; color:#1d1c1d;">ABC Online &mdash; R. Delacroix</td>
+          </tr>
+        </table>
+
+        <div style="margin:2px 0 4px 0;">
+          <a href="https://app.meltwater.com/mm/redirect/71ab35de" style="font-size:15px; font-weight:700; color:#1264a3; text-decoration:none;">Minister criticised over proposed advertising changes</a>
+        </div>
+
+        <div style="font-size:15px; line-height:22px; color:#1d1c1d; margin:2px 0 8px 0;">
+          The <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">regional</code> member for the district says the partial ban falls short of the review, and other <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">funding</code> members are expected to move amendments.
+          <a href="https://www.abc.net.au/news/2026-06-16/chaney-gambling-ad-changes/105432110" style="color:#1264a3; text-decoration:none;">&#x2197;&#xFE0E;</a>
+        </div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">
+          <tr>
+            <td width="14" valign="top" style="width:14px; padding-right:6px;">
+              <img src="https://<your-host>/icons/media/v1/globe.png" width="14" height="18" alt="" style="display:block; width:14px; height:18px; border:0;">
+            </td>
+            <td valign="top" style="font-size:13px; line-height:18px; color:#616061;">Tue, 16 Jun 2026, 11:14am AEST&nbsp;&nbsp;&middot;&nbsp;&nbsp;Briefs: Regional Health, Transport &#128077;&nbsp;&nbsp;&middot;&nbsp;&nbsp;1.2M reach</td>
+          </tr>
+        </table>
+
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ---- Tile 6 ---- -->
+  <tr><td style="padding:6px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid rgba(29,28,29,0.08);">
+      <tr><td style="border-left:4px solid #0ca678; padding:10px 14px 12px 14px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:3px;">
+          <tr>
+            <td width="18" valign="middle" style="width:18px; padding-right:8px;">
+              <img src="https://www.google.com/s2/favicons?sz=64&amp;domain=capitalbrief.com" width="18" height="18" alt="" style="display:block; width:18px; height:18px; border:0; border-radius:3px;">
+            </td>
+            <td valign="middle" style="font-size:15px; font-weight:700; color:#1d1c1d;">Capital Brief &mdash; T. Nakamura</td>
+          </tr>
+        </table>
+
+        <div style="margin:2px 0 4px 0;">
+          <a href="https://app.meltwater.com/mm/redirect/2f60a1c8" style="font-size:15px; font-weight:700; color:#1264a3; text-decoration:none;">Is the inner north the next frontier for the reform push?</a>
+        </div>
+
+        <div style="font-size:15px; line-height:22px; color:#1d1c1d; margin:2px 0 8px 0;">
+          Organisers are quietly testing whether the <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">funding</code> playbook travels to districts held for four decades.
+          <a href="https://www.capitalbrief.com/article/canberra-independents-9d31" style="color:#1264a3; text-decoration:none;">&#x2197;&#xFE0E;</a>
+        </div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">
+          <tr>
+            <td width="14" valign="top" style="width:14px; padding-right:6px;">
+              <img src="https://<your-host>/icons/media/v1/globe.png" width="14" height="18" alt="" style="display:block; width:14px; height:18px; border:0;">
+            </td>
+            <td valign="top" style="font-size:13px; line-height:18px; color:#616061;">Tue, 16 Jun 2026, 7:31am AEST&nbsp;&nbsp;&middot;&nbsp;&nbsp;Brief: Regional Health &#128078;&nbsp;&nbsp;&middot;&nbsp;&nbsp;85.2K reach</td>
+          </tr>
+        </table>
+
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ================= Section: Transport ================= -->
+  <tr><td style="padding:18px 2px 0 2px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td width="10" valign="middle" style="width:10px; padding:0 8px 0 0;">
+          <div style="width:10px; height:10px; background:#4263eb; border-radius:2px; font-size:0; line-height:0;">&nbsp;</div>
+        </td>
+        <td valign="middle" style="font-size:13px; line-height:18px; color:#1d1c1d;">
+          <span style="font-weight:700; letter-spacing:0.4px;">TRANSPORT</span>
+          <span style="color:#616061; font-weight:400;">&nbsp;&middot;&nbsp;9 stories&nbsp;&middot;&nbsp;2.3M combined reach</span>
+        </td>
+      </tr>
+    </table>
+    <div style="height:1px; background:rgba(29,28,29,0.13); font-size:0; line-height:0; margin:8px 0 6px 0;">&nbsp;</div>
+  </td></tr>
+
+  <!-- ---- Tile 7: COLLAPSED BROADCAST VARIANT.
+                   title === masthead, so buildAttachment omits `title` entirely and
+                   moves the URL to author_link -- the masthead itself is the link
+                   and there is no headline row. ---- -->
+  <tr><td style="padding:6px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid rgba(29,28,29,0.08);">
+      <tr><td style="border-left:4px solid #4263eb; padding:10px 14px 12px 14px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:3px;">
+          <tr>
+            <td width="18" valign="middle" style="width:18px; padding-right:8px;">
+              <img src="https://www.google.com/s2/favicons?sz=64&amp;domain=7news.com.au" width="18" height="18" alt="" style="display:block; width:18px; height:18px; border:0; border-radius:3px;">
+            </td>
+            <td valign="middle">
+              <a href="https://app.meltwater.com/mm/redirect/5c02be93" style="font-size:15px; font-weight:700; color:#1264a3; text-decoration:none;">7 Albury</a>
+            </td>
+          </tr>
+        </table>
+
+        <div style="font-size:15px; line-height:22px; color:#1d1c1d; margin:2px 0 8px 0;">
+          &hellip; the <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">transport</code> told the meeting the funding formula would cost the district a seat at the table &hellip;
+        </div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">
+          <tr>
+            <td width="14" valign="top" style="width:14px; padding-right:6px;">
+              <img src="https://<your-host>/icons/media/v1/tv.png" width="14" height="18" alt="" style="display:block; width:14px; height:18px; border:0;">
+            </td>
+            <td valign="top" style="font-size:13px; line-height:18px; color:#616061;">Wed, 10 Jun 2026, 6:02pm AEST&nbsp;&nbsp;&middot;&nbsp;&nbsp;Brief: Transport &#128528;&nbsp;&nbsp;&middot;&nbsp;&nbsp;42.1K reach</td>
+          </tr>
+        </table>
+
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ================= Section: Media Monitoring (default brief colour) ================= -->
+  <tr><td style="padding:18px 2px 0 2px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td width="10" valign="middle" style="width:10px; padding:0 8px 0 0;">
+          <div style="width:10px; height:10px; background:#868e96; border-radius:2px; font-size:0; line-height:0;">&nbsp;</div>
+        </td>
+        <td valign="middle" style="font-size:13px; line-height:18px; color:#1d1c1d;">
+          <span style="font-weight:700; letter-spacing:0.4px;">MEDIA MONITORING</span>
+          <span style="color:#616061; font-weight:400;">&nbsp;&middot;&nbsp;4 stories&nbsp;&middot;&nbsp;310K combined reach</span>
+        </td>
+      </tr>
+    </table>
+    <div style="height:1px; background:rgba(29,28,29,0.13); font-size:0; line-height:0; margin:8px 0 6px 0;">&nbsp;</div>
+  </td></tr>
+
+  <!-- ---- Tile 8: fallback brief colour #868e96, and the snippet-less
+                   "Mentions: `kw (n)`" body from buildMentionsLine(). ---- -->
+  <tr><td style="padding:6px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid rgba(29,28,29,0.08);">
+      <tr><td style="border-left:4px solid #868e96; padding:10px 14px 12px 14px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:3px;">
+          <tr>
+            <td width="18" valign="middle" style="width:18px; padding-right:8px;">
+              <img src="https://www.google.com/s2/favicons?sz=64&amp;domain=reddit.com" width="18" height="18" alt="" style="display:block; width:18px; height:18px; border:0; border-radius:3px;">
+            </td>
+            <td valign="middle" style="font-size:15px; font-weight:700; color:#1d1c1d;">r/PolicyForum</td>
+          </tr>
+        </table>
+
+        <div style="margin:2px 0 4px 0;">
+          <a href="https://app.meltwater.com/mm/redirect/aa14e0b2" style="font-size:15px; font-weight:700; color:#1264a3; text-decoration:none;">Megathread: funding changes and what they mean for the cross-bench</a>
+        </div>
+
+        <div style="font-size:15px; line-height:22px; color:#1d1c1d; margin:2px 0 8px 0;">
+          Mentions: <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">funding (4)</code>, <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">transport (2)</code>, <code style="background:rgba(29,28,29,0.04); border:1px solid rgba(29,28,29,0.13); border-radius:3px; padding:2px 3px 1px; font-size:12px; font-family:'Monaco','Menlo','Consolas',monospace; color:rgb(192,19,67); line-height:18px;">Energy Policy (1)</code>
+          <a href="https://www.reddit.com/r/PolicyForum/comments/1kx9d2b/" style="color:#1264a3; text-decoration:none;">&#x2197;&#xFE0E;</a>
+        </div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">
+          <tr>
+            <td width="14" valign="top" style="width:14px; padding-right:6px;">
+              <img src="https://<your-host>/icons/media/v1/message-circle.png" width="14" height="18" alt="" style="display:block; width:14px; height:18px; border:0;">
+            </td>
+            <td valign="top" style="font-size:13px; line-height:18px; color:#616061;">Wed, 17 Jun 2026, ~8:41am AEST&nbsp;&nbsp;&middot;&nbsp;&nbsp;Brief: Media Monitoring&nbsp;&nbsp;&middot;&nbsp;&nbsp;18.4K reach</td>
+          </tr>
+        </table>
+
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ================= Footer ================= -->
+  <tr><td style="padding:22px 2px 0 2px;">
+    <div style="height:1px; background:rgba(29,28,29,0.13); font-size:0; line-height:0; margin-bottom:10px;">&nbsp;</div>
+    <div style="font-size:12px; line-height:18px; color:#616061;">
+      Generated by Headwater from the Meltwater feed &nbsp;&middot;&nbsp;
+      <a href="https://slack.com/app_redirect?channel=your-channel" style="color:#1264a3; text-decoration:none;">Open the Slack channel</a>
+    </div>
+  </td></tr>
+
+</table>
+
+</td>
+</tr>
+</table>
+</body>
+</html>

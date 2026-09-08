@@ -26,6 +26,9 @@ import { renderInspectPage } from "@/ui/inspect";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
 import { runHeartbeat } from "@/lib/heartbeat";
 import { MEDIA_ICON_PNG } from "@/assets/mediaIcons";
+import { buildDigest, DIGEST_TZ } from "@/lib/digest";
+import { renderDigestEmail, renderDigestText } from "@/ui/email";
+import { runDigestSend } from "@/lib/digestSend";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -110,6 +113,7 @@ app.get("/health", async (c) => {
     service: "headwater",
     build: "headwater-25", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
+    digestEnabled: c.env.DIGEST_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
     configOk: config.ok,
@@ -118,6 +122,8 @@ app.get("/health", async (c) => {
       slackToken: !!c.env.SLACK_BOT_TOKEN,
       slackChannel: !!c.env.SLACK_DEFAULT_CHANNEL,
       accessConfigured: !!c.env.ACCESS_TEAM_DOMAIN && !!c.env.ACCESS_AUD,
+      // Booleans only — never the account id, token, or recipient list.
+      digestMailer: !!c.env.RESEND_API_KEY && !!c.env.DIGEST_FROM && !!c.env.DIGEST_TO,
     },
     // How many distinct channels the feed fans out to (count only — ids are secret). 1 = default only.
     channels: configuredChannels(routing, c.env).length,
@@ -451,16 +457,74 @@ app.get("/inspect", async (c) => {
   return c.html(renderInspectPage(events, "", { before, olderCursor, failedOnly, failedCount }));
 });
 
+/**
+ * Preview the periodic digest exactly as it will be emailed. Access-gated like /inspect.
+ *
+ *   /digest              last 24h
+ *   /digest?days=7       last 7 days
+ *   /digest?text=1       the text/plain alternative, so both parts can be eyeballed
+ *
+ * Read-only: renders from the stories table and sends nothing. This is the surface to iterate the
+ * design on before any mail is wired up.
+ */
+app.get("/digest", async (c) => {
+  if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
+  const daysRaw = Number(c.req.query("days"));
+  const days = Number.isFinite(daysRaw) && daysRaw > 0 ? Math.min(daysRaw, 30) : 1;
+  const untilMs = Date.now();
+  const sinceMs = untilMs - days * 24 * 60 * 60 * 1000;
+  const digest = await buildDigest(c.env, sinceMs, untilMs);
+  if (c.req.query("text")) return c.text(renderDigestText(digest, { timeZone: DIGEST_TZ }));
+  return c.html(renderDigestEmail(digest, { timeZone: DIGEST_TZ }));
+});
+
+/**
+ * Admin: run the daily digest send on demand — the same code path the cron uses. Gated by REPLAY_KEY
+ * like the other /admin routes.
+ *
+ *   ?dryRun=1   build and render, report the story count, send NOTHING (ignores DIGEST_ENABLED)
+ *   ?force=1    bypass the 8am-Melbourne hour gate for a real send
+ *
+ * `force` deliberately does NOT bypass the already-sent-today guard — testing must never be able to
+ * double-send a real digest to a real inbox.
+ */
+app.post("/admin/digest-send", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const dryRun = c.req.query("dryRun") === "1";
+  const force = c.req.query("force") === "1";
+  return c.json(await runDigestSend(c.env, Date.now(), { dryRun, force }));
+});
+
 // Cron Triggers (wrangler.jsonc `triggers.crons`), dispatched by controller.cron:
-//   "*/15 * * * *" → self-healing reconcile;  "0 * * * *" → hourly ingestion heartbeat.
-// (At the top of the hour both fire — Cloudflare invokes scheduled() once per matching cron.)
+//   "*/15 * * * *"          → self-healing reconcile
+//   "0 * * * *"             → hourly ingestion heartbeat + card healer
+//   "0 21 * * *" / "0 22 * * *" → daily digest email; the two candidate UTC hours for 8am Melbourne
+//                             (AEDT/AEST). runDigestSend's own gate lets exactly one through, so
+//                             the send doesn't drift by an hour across daylight saving.
+// (At the top of the hour several fire — Cloudflare invokes scheduled() once per matching cron.)
 // Never throw out of scheduled() — a rejected cron just retries noisily; each job self-reports.
 export { StationRenderer } from "@/do/stationRenderer";
+
+/** The two UTC hours that can be 8am in Melbourne, depending on daylight saving. */
+const DIGEST_CRONS = new Set(["0 21 * * *", "0 22 * * *"]);
 
 export default {
   fetch: app.fetch,
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    if (controller.cron === "0 * * * *") {
+    if (DIGEST_CRONS.has(controller.cron)) {
+      ctx.waitUntil(
+        runDigestSend(env, Date.now())
+          .then((r) => {
+            // Only log the runs that did something; a skipped wrong-hour tick is pure noise.
+            if (r.sent || r.error || r.empty) {
+              console.warn(`[digest] day=${r.day} stories=${r.storyCount} sent=${r.sent}${r.empty ? " empty=1" : ""}${r.error ? ` error=${r.error}` : ""}`);
+            }
+          })
+          .catch((e) => console.error(`[digest] failed: ${String(e)}`)),
+      );
+    } else if (controller.cron === "0 * * * *") {
       ctx.waitUntil(runHeartbeat(env, Date.now()).catch(() => {}));
       ctx.waitUntil(heal(env).catch((e) => console.error(`[heal] failed: ${String(e)}`)));
     } else {

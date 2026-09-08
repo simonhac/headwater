@@ -91,6 +91,6 @@ function buildAlertText(latest: number | null, ageHours: number | null, threshol
   return (
     `:warning: *Headwater ingestion stalled* — no Meltwater mention received in ${ageText} ` +
     `(threshold ${thresholdHours}h). Last mention: ${lastSeen}.\n` +
-    `Check the Meltwater destination URL/token and <https://feed.moofer.com/health|feed.moofer.com/health> (\`configOk\`).`
+    `Check the Meltwater destination URL/token and the Worker's \`/health\` (\`configOk\`).`
   );
 }
