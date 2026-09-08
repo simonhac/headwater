@@ -48,6 +48,23 @@ describe("mastheadForDomain (outlets.ts)", () => {
     expect(mastheadForDomain("yahoo.com")).toBeNull();
   });
 
+  it("resolves mastheads the domain gives no clue about (pass two)", () => {
+    expect(mastheadForDomain("kalminer.com.au")).toBe("Kalgoorlie Miner"); // abbreviated domain
+    expect(mastheadForDomain("thegazette.com.au")).toBe("The Warragul & Drouin Gazette");
+    expect(mastheadForDomain("ulladullatimes.com.au")).toBe("Milton Ulladulla Times");
+    expect(mastheadForDomain("radioinfo.com.au")).toBe("radioinfo"); // lower-case brand, like marie claire
+  });
+
+  it("keys the two Newcastle Herald domains and the Star Weekly editions precisely", () => {
+    // Nine kept the legacy theherald.com.au (it 301s to smh.com.au) while ACM publishes at
+    // newcastleherald.com.au; Meltwater still cites both, and both are the same masthead.
+    expect(mastheadForDomain("theherald.com.au")).toBe("Newcastle Herald");
+    expect(mastheadForDomain("newcastleherald.com.au")).toBe("Newcastle Herald");
+    // Star Weekly is keyed per edition subdomain — a bare starweekly.com.au would mislabel the rest.
+    expect(mastheadForDomain("maribyrnonghobsonsbay.starweekly.com.au")).toBe("Maribyrnong & Hobsons Bay Star Weekly");
+    expect(mastheadForDomain("starweekly.com.au")).toBeNull();
+  });
+
   it("leaves multi-masthead publishers unmapped", () => {
     // Active Networks publishes Peninsula Living, North Shore Living and Think Local — a mapped name
     // wins over authorName, so mapping the domain would stamp the wrong magazine on their articles.

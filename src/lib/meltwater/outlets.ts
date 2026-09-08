@@ -99,6 +99,97 @@ const MASTHEAD_BY_DOMAIN: Record<string, string> = {
   "theleader.com.au": "St George & Sutherland Shire Leader",
   "thesaturdaypaper.com.au": "The Saturday Paper", // [2]
   "weeklytimesnow.com.au": "The Weekly Times", // [1]
+  // --- pass two (2026-09-08): the long tail. Same rule as above — every name here was read off the
+  // publisher's own page title, not inferred from the domain. Grouped by owner because the network
+  // titles follow a house pattern ("<Place> news, sport and weather | <Masthead> | <Place>, <State>"),
+  // which is what makes them cheap to verify in bulk. ---
+  // ACM (Australian Community Media)
+  "bendigoadvertiser.com.au": "Bendigo Advertiser",
+  "braidwoodtimes.com.au": "Braidwood Times",
+  "farmweekly.com.au": "Farm Weekly",
+  "gloucesteradvocate.com.au": "Gloucester Advocate",
+  "huntervalleynews.net.au": "Hunter Valley News",
+  "inverelltimes.com.au": "The Inverell Times",
+  "jimboombatimes.com.au": "Jimboomba Times",
+  "lithgowmercury.com.au": "Lithgow Mercury",
+  "mandurahmail.com.au": "Mandurah Mail",
+  "moreechampion.com.au": "Moree Champion",
+  "muswellbrookchronicle.com.au": "Muswellbrook Chronicle",
+  "newcastleherald.com.au": "Newcastle Herald", // the live domain; theherald.com.au is the legacy one
+  "northweststar.com.au": "The North West Star",
+  "portpirierecorder.com.au": "The Recorder",
+  "redlandcitybulletin.com.au": "Redland City Bulletin",
+  "sconeadvocate.com.au": "The Scone Advocate",
+  "southcoastregister.com.au": "South Coast Register",
+  "ulladullatimes.com.au": "Milton Ulladulla Times", // not "Ulladulla Times"
+  "wellingtontimes.com.au": "Wellington Times",
+  // Seven West Media's WA regionals — the domains are abbreviations, so none of these are derivable
+  "amrtimes.com.au": "Augusta-Margaret River Times",
+  "broomead.com.au": "Broome Advertiser",
+  "harveyreporter.com.au": "Harvey Waroona Reporter",
+  "kalminer.com.au": "Kalgoorlie Miner",
+  "mbtimes.com.au": "Manjimup Bridgetown Times",
+  "midwesttimes.com.au": "Midwest Times",
+  "narroginobserver.com.au": "Narrogin Observer",
+  "soundtelegraph.com.au": "Sound Telegraph",
+  "swtimes.com.au": "South Western Times",
+  // News Corp
+  "goldcoastbulletin.com.au": "Gold Coast Bulletin",
+  // Independents, trade press and everything else
+  "aap.com.au": "AAP",
+  "agedcareinsite.com.au": "Aged Care Insite",
+  "au.rollingstone.com": "Rolling Stone Australia",
+  "ausleisure.com.au": "Australasian Leisure Management",
+  "australiainstitute.org.au": "The Australia Institute",
+  "businessbuilders.com.au": "Business Builders",
+  "cairnsnews.org": "Cairns News",
+  "canberradaily.com.au": "Canberra Daily",
+  "catholicweekly.com.au": "The Catholic Weekly",
+  "channelnews.com.au": "ChannelNews",
+  "cqtoday.com.au": "CQ Today",
+  "cyberdaily.au": "Cyber Daily",
+  "deepcutnews.com": "Deepcut News",
+  "easternmelburnian.com.au": "The Eastern Melburnian",
+  "echo.net.au": "The Echo",
+  "emeraldtoday.com.au": "Emerald Today",
+  "energynewsbulletin.net": "Energy News Bulletin",
+  "greenleft.org.au": "Green Left",
+  "healthservicesdaily.com.au": "Health Services Daily",
+  "honisoit.com": "Honi Soit",
+  "independentaustralia.net": "Independent Australia",
+  "insidestory.org.au": "Inside Story",
+  "insurancebusinessmag.com": "Insurance Business",
+  "lawyersweekly.com.au": "Lawyers Weekly",
+  "malcolmrobertsqld.com.au": "Malcolm Roberts", // a senator's own site — the publisher IS the person,
+  //                                                as with the existing David Pocock / Zali Steggall cards
+  "manofmany.com": "Man of Many",
+  "maribyrnonghobsonsbay.starweekly.com.au": "Maribyrnong & Hobsons Bay Star Weekly", // Star Weekly is
+  //   keyed per edition subdomain; a bare starweekly.com.au would mislabel every other edition
+  "neoskosmos.com": "Neos Kosmos",
+  "nowtolove.com.au": "Now to Love",
+  "oncologyrepublic.com.au": "Oncology Republic",
+  "psnews.com.au": "PS News",
+  "radioinfo.com.au": "radioinfo", // lower-case brand, like marie claire
+  "russh.com": "RUSSH",
+  "screenhub.com.au": "ScreenHub",
+  "smartcompany.com.au": "SmartCompany",
+  "southwestlocalnews.com.au": "South West Local News",
+  "startsat60.com": "Starts at 60",
+  "stplnews.com.au": "STPL News",
+  "sunraysiadaily.com.au": "Sunraysia Daily",
+  "sydneyartsguide.com.au": "Sydney Arts Guide",
+  "tasmanianinquirer.com.au": "Tasmanian Inquirer",
+  "thedriven.io": "The Driven",
+  "thegazette.com.au": "The Warragul & Drouin Gazette", // nothing about the domain says Warragul
+  "thestraight.com.au": "The Straight",
+  "theweeklysource.com.au": "The Weekly Source",
+  "thinklocal.com.au": "Think Local",
+  "tickernews.co": "Ticker News",
+  "timesnewsgroup.com.au": "Times News Group",
+  "tvcentral.com.au": "TV Central",
+  "tvtonight.com.au": "TV Tonight",
+  "whichcar.com.au": "WhichCar",
+  "womensagenda.com.au": "Women's Agenda",
 };
 
 // Outlet/organisation words: a byline candidate containing one is a masthead, not a person's name.

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { parseWebhookPayload } from "@/lib/meltwater/parse";
-import { reparseStory, renderStoryCard, resolveBroadcast, redecodeRecentStories } from "@/lib/redecode";
-import type { StoryRow } from "@/lib/story";
+import { reparseStory, renderStoryCard, remapOutletNames, resolveBroadcast, redecodeRecentStories } from "@/lib/redecode";
+import type { Outlet, StoryRow } from "@/lib/story";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { Env } from "@/env";
 
@@ -138,7 +138,78 @@ describe("resolveBroadcast (redecode.ts)", () => {
   });
 });
 
-// A D1Database stub: updatedSince() reads `.all()`, updateRenderState() calls `.run()`.
+
+describe("remapOutletNames (redecode.ts)", () => {
+  const outlet = (name: string, outletUrl: string | null, reach = 1000): Outlet => ({
+    name,
+    url: "https://example.test/a",
+    reach,
+    outletUrl,
+  });
+
+  it("renames a stored outlet to the masthead its publisher URL now maps to", () => {
+    const { outlets, renames } = remapOutletNames([outlet("Naroomanewsonline", "https://www.naroomanewsonline.com.au")]);
+    expect(outlets[0]!.name).toBe("Narooma News");
+    expect(renames).toEqual([{ from: "Naroomanewsonline", to: "Narooma News" }]);
+  });
+
+  it("leaves an outlet alone when the domain is unmapped — it never derives a name", () => {
+    // The whole point: an unnameable publisher keeps whatever authorName gave it at ingestion, rather
+    // than being replaced by a domain-derived slug.
+    const stored = [outlet("Chelsea Mordialloc Mentone News", "https://www.baysidenews.com.au/")];
+    const { outlets, renames } = remapOutletNames(stored);
+    expect(renames).toEqual([]);
+    expect(outlets).toBe(stored); // same reference — nothing rewritten
+  });
+
+  it("skips old-shape entries that predate outletUrl", () => {
+    const { renames } = remapOutletNames([{ name: "Ntnews", url: "https://example.test/a", reach: 10 }]);
+    expect(renames).toEqual([]);
+  });
+
+  it("never demotes a resolved broadcast station to its network's masthead", () => {
+    // Regression caught in a production dry run: abc.net.au maps to the plain "ABC", so remapping a
+    // radio entry replaced the station the resolve pipeline had worked out. Station naming is not this
+    // table's job.
+    const stored = [
+      { ...outlet("ABC Central Coast NSW", "https://www.abc.net.au/centralcoast"), mediaType: "radio" },
+      { ...outlet("ABC RN", "https://www.abc.net.au/listen/radionational"), mediaType: "radio" },
+    ];
+    const { outlets, renames } = remapOutletNames(stored);
+    expect(renames).toEqual([]);
+    expect(outlets.map((o) => o.name)).toEqual(["ABC Central Coast NSW", "ABC RN"]);
+  });
+
+  it("is idempotent — a second pass renames nothing", () => {
+    const once = remapOutletNames([outlet("Msn", "https://www.msn.com/en-au/")]);
+    expect(once.renames).toHaveLength(1);
+    expect(remapOutletNames(once.outlets).renames).toEqual([]);
+  });
+
+  it("fixes the HEADLINE of a merged card whose lead outlet is not the anchor", () => {
+    // Regression from production: the anchor was naroomanewsonline (reach 1700) but the higher-reach
+    // northweststar entry led the card, so re-decoding the anchor alone left the headline stale.
+    const anchor = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 1.7k Reach",
+      source: "MPs",
+      authorName: "Dana Daniel",
+      links: { source: trackingUrl("https://www.naroomanewsonline.com.au") },
+    })[0]!;
+    const stored = [
+      outlet("Naroomanewsonline", "https://www.naroomanewsonline.com.au", 1700),
+      outlet("Bordermail", "https://www.bordermail.com.au/", 7480),
+    ];
+    const { outlets } = remapOutletNames(stored);
+    const row = { ...storyRow(nineDoc), outlets_json: JSON.stringify(outlets) };
+    const { attachment } = renderStoryCard(row, anchor, outlets);
+    // The lead is the max-reach outlet, so the card's author_name is the renamed masthead.
+    expect(JSON.stringify(attachment)).toContain("The Border Mail");
+    expect(JSON.stringify(attachment)).not.toContain("Bordermail");
+  });
+});
+
+// A D1Database stub: updatedSince() reads `.all()`, repairText() calls `.run()`.
 function fakeDB(rows: StoryRow[]) {
   return {
     prepare: () => ({
