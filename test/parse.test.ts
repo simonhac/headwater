@@ -532,39 +532,107 @@ describe("parseWebhookPayload — defensive extraction", () => {
 describe("tidySnippet", () => {
   it("drops a severed sentence-ending mark, leaving a clean sentence start", () => {
     expect(tidySnippet(". The message we will send is that there is no consequence")).toBe(
-      "The message we will send is that there is no consequence",
+      "The message we will send is that there is no consequence\u2026",
     );
-    expect(tidySnippet("? So many of the stations we listen to")).toBe("So many of the stations we listen to");
-    expect(tidySnippet("! Right then")).toBe("Right then");
+    expect(tidySnippet("? So many of the stations we listen to")).toBe("So many of the stations we listen to\u2026");
+    expect(tidySnippet("! Right then")).toBe("Right then\u2026");
   });
 
-  it("marks a severed clause with an ellipsis — the reader IS mid-thought", () => {
+  it("marks a severed clause with an ellipsis \u2014 the reader IS mid-thought", () => {
     expect(tidySnippet(", Mums for Nuclear. There's a whole lot of them")).toBe(
-      "…Mums for Nuclear. There's a whole lot of them",
+      "\u2026Mums for Nuclear. There's a whole lot of them\u2026",
     );
-    expect(tidySnippet(": Issue 657 August 1")).toBe("…Issue 657 August 1");
-    expect(tidySnippet("; and then some")).toBe("…and then some");
+    expect(tidySnippet(": Issue 657 August 1")).toBe("\u2026Issue 657 August 1\u2026");
+    expect(tidySnippet("; and then some")).toBe("\u2026and then some\u2026");
   });
 
-  it("leaves Meltwater's own leading ellipsis alone", () => {
-    // 679 of 1441 production snippets start this way — it's their truncation marker, not a defect.
+  it("normalizes Meltwater's own `...` marker to a single ellipsis", () => {
+    // 733 of 1525 stored snippets lead with their marker and 872 end with one. It's not a defect,
+    // but leaving it as three dots puts two glyphs side by side on the same card.
     expect(tidySnippet("...the legislation, now before a Senate inquiry")).toBe(
-      "...the legislation, now before a Senate inquiry",
+      "\u2026the legislation, now before a Senate inquiry\u2026",
     );
-    expect(tidySnippet("…already elided")).toBe("…already elided");
+    expect(tidySnippet("\u2026already elided")).toBe("\u2026already elided\u2026");
+    expect(tidySnippet("...Speakers include: Dr Daniel Mulino and Senator Paul Scarr Andrew...")).toBe(
+      "\u2026Speakers include: Dr Daniel Mulino and Senator Paul Scarr Andrew\u2026",
+    );
+    expect(tidySnippet("cut here ....")).toBe("\u2026cut here\u2026");
   });
 
-  it("leaves ordinary text untouched", () => {
-    expect(tidySnippet("The premier said today")).toBe("The premier said today");
-    expect(tidySnippet("1.5 degrees of warming")).toBe("1.5 degrees of warming");
+  it("marks an unmarked mid-sentence start \u2014 lowercase, digit, or a cut contraction", () => {
+    // 433 of 1525 start lowercase with no marker at all; 14 start on a digit. The apostrophe cases
+    // are the window landing inside a contraction: "it's" \u2192 "'s", "haven't" \u2192 "'t".
+    expect(tidySnippet("a new gambling licence to online bookmaker")).toBe(
+      "\u2026a new gambling licence to online bookmaker\u2026",
+    );
+    expect(tidySnippet("2019 was the year")).toBe("\u20262019 was the year\u2026");
+    expect(tidySnippet("'s important to as I say have these conv")).toBe(
+      "\u2026's important to as I say have these conv\u2026",
+    );
+  });
+
+  it("handles debris the whitespace-only rule used to miss", () => {
+    // A clause mark closed by a quote (no space before it), and a word split across the window edge.
+    expect(tidySnippet(",\u201d he said. \u201cTheir longest-serving MP thinks the")).toBe(
+      "\u2026he said. \u201cTheir longest-serving MP thinks the\u2026",
+    );
+    expect(tidySnippet("-free zone at the moment. They've really struggl")).toBe(
+      "\u2026free zone at the moment. They've really struggl\u2026",
+    );
+    // Dropping the severed full stop can still leave a lowercase start \u2014 mark that too.
+    expect(tidySnippet(". farming salmon in Long Bay, after the EPA rene")).toBe(
+      "\u2026farming salmon in Long Bay, after the EPA rene\u2026",
+    );
+  });
+
+  it("marks a tail cut mid-sentence, and replaces severed clause punctuation", () => {
+    // 536 of 1525 end on a bare word, 19 on a comma \u2014 Meltwater just stops.
+    expect(tidySnippet("Predicting preferences from One Nation, Labor and the")).toBe(
+      "Predicting preferences from One Nation, Labor and the\u2026",
+    );
+    expect(tidySnippet("They're pretty much all in a metropolitan of t,")).toBe(
+      "They're pretty much all in a metropolitan of t\u2026",
+    );
+    expect(tidySnippet("The rollout is inevitable \u2014")).toBe("The rollout is inevitable\u2026");
+  });
+
+  it("leaves a complete sentence's tail alone, including inside a quote", () => {
+    expect(tidySnippet("A quick look at today's papers.")).toBe("A quick look at today's papers.");
+    expect(tidySnippet('He said it was "a disgrace."')).toBe('He said it was "a disgrace."');
+    expect(tidySnippet("Is that so?")).toBe("Is that so?");
+  });
+
+  it("leaves an uppercase start untouched \u2014 we cannot tell a proper noun from a sentence", () => {
+    expect(tidySnippet("The premier said today.")).toBe("The premier said today.");
+    expect(tidySnippet("\u201cThe premier said today")).toBe("\u201cThe premier said today\u2026");
     // A decimal or abbreviation must not be mistaken for a severed sentence: the rule requires
-    // whitespace after the mark.
-    expect(tidySnippet(".NET developers")).toBe(".NET developers");
+    // whitespace (or a closing quote) after the mark.
+    expect(tidySnippet(".NET developers rejoice.")).toBe(".NET developers rejoice.");
+    expect(tidySnippet("1.5 degrees of warming.")).toBe("\u20261.5 degrees of warming.");
+  });
+
+  it("is idempotent \u2014 the repair sweep must not churn cards on a re-run", () => {
+    // Verified against all 195 snippets in the live 7-day window. The case that first broke this:
+    // a marker followed by a cut contraction, where swallowing the apostrophe as a "closing quote"
+    // turned "\u2026's important" into "\u2026s important" on the second pass.
+    for (const s of [
+      "...'s important to as I say have these conv",
+      "\u2026's important to as I say have these conv",
+      ". The message we will send",
+      ",\u201d he said. \u201cTheir longest-serving MP thinks the",
+      "-free zone at the moment",
+      "They're pretty much all in a metropolitan of t,",
+      'He said it was "a disgrace."',
+      ".NET developers rejoice.",
+    ]) {
+      expect(tidySnippet(tidySnippet(s))).toBe(tidySnippet(s));
+    }
   });
 
   it("passes null/empty straight through", () => {
     expect(tidySnippet(null)).toBeNull();
     expect(tidySnippet("")).toBe("");
     expect(tidySnippet(". ")).toBeNull();
+    expect(tidySnippet("...")).toBeNull();
   });
 });
