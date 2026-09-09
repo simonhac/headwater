@@ -162,13 +162,14 @@ describe("POST /admin/repair-snippets", () => {
     expect((await storyRow("k3"))!.updated_at).toBe(NOW - 60 * 86400 * 1000);
   });
 
-  it("leaves Meltwater's own leading ellipsis alone, and skips clean rows entirely", async () => {
+  it("normalizes Meltwater's own `...` marker, and skips rows already in canonical form", async () => {
     await seed({ key: "k4", ts: "4.4", snippet: "...their truncation marker" });
-    await seed({ key: "k5", ts: "5.5", snippet: "An ordinary snippet" });
+    await seed({ key: "k5", ts: "5.5", snippet: "\u2026an already-cleansed snippet\u2026" });
     const body = (await (await call()).json()) as { scanned: number; needRepair: number };
     expect(body.scanned).toBe(2);
-    expect(body.needRepair).toBe(0);
-    expect(updates).toEqual([]);
+    expect(body.needRepair).toBe(1); // only k4 — k5 is a no-op, so the sweep is idempotent
+    const primary = JSON.parse((await storyRow("k4"))!.primary_mention_json) as { snippet: string };
+    expect(primary.snippet).toBe("\u2026their truncation marker\u2026");
   });
 
   it("dryRun=1 reports the work without writing or calling Slack", async () => {

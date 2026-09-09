@@ -116,7 +116,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-35", // bump on each deploy to confirm the running code
+    build: "headwater-36", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     digestEnabled: c.env.DIGEST_ENABLED === "true",
     digestSubscribers: subscribers, // count only — addresses stay in D1
@@ -271,7 +271,7 @@ app.post("/admin/coalesce", async (c) => {
   }
 });
 
-// --- admin: repair snippets Meltwater truncated mid-sentence (leading ". " / ", ") in stories
+// --- admin: repair snippets Meltwater truncated mid-sentence at either edge, in stories
 // ALREADY stored, rewriting both the primary snapshot and each outlet's copy, and chat.updating any
 // card whose rendering changes. Unlike /admin/redecode this touches outlets_json (where a
 // high-reach outlet's own snippet leads the card) and persists data-only fixes. Gated by

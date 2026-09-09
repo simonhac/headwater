@@ -40,7 +40,15 @@ export interface SnippetRepairResult {
   samples: { ts: string; before: string; after: string }[];
 }
 
-const MAX_SAMPLES = 20;
+const MAX_SAMPLES = 50;
+/** Keep both edges of a sample visible: the cleanse changes the head, the tail, or both. */
+const SAMPLE_EDGE = 40;
+
+/** Elide the middle, not the end — a tail-only change is invisible under a plain `slice(0, n)`. */
+function edges(s: string): string {
+  return s.length <= SAMPLE_EDGE * 2 + 5 ? s : `${s.slice(0, SAMPLE_EDGE)} [\u2026] ${s.slice(-SAMPLE_EDGE)}`;
+}
+
 /** Mirrors redecode/coalesce: stay well under Cloudflare's subrequest limit; re-run until 0. */
 const MAX_UPDATES_PER_CALL = 40;
 
@@ -101,7 +109,7 @@ export async function repairSnippets(
     if (!changed) continue;
     res.needRepair++;
     if (res.samples.length < MAX_SAMPLES) {
-      res.samples.push({ ts: row.slack_ts, before: before.slice(0, 60), after: after.slice(0, 60) });
+      res.samples.push({ ts: row.slack_ts, before: edges(before), after: edges(after) });
     }
 
     const { attachment, hash } = renderStoryCard(row, primary, outlets);

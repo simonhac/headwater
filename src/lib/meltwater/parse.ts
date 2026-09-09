@@ -258,25 +258,90 @@ function everyMentionToMention(doc: Record<string, Json>, topBrief: string | nul
 }
 
 /**
- * Repair a snippet that Meltwater cut mid-sentence and left the severed punctuation on.
+ * Repair a snippet that Meltwater cut mid-sentence at either edge.
  *
- * Their excerpts routinely begin `". The message we will send is…"` or `", Mums for Nuclear…"` —
- * the tail of the preceding clause. Sentence-ending punctuation is simply dropped, because what
- * follows is already a clean sentence start; clause punctuation becomes an ellipsis, because the
- * reader IS being dropped mid-thought and should see that.
+ * Their excerpt is a ~300-char window anchored on the matched keyword (see
+ * `docs/duplicate-detection.md`), so it rarely coincides with sentence boundaries. Roughly half the
+ * time they mark the cut with a literal `...`; the rest of the time they simply stop, leaving text
+ * that starts lowercase (`"s important to as I say"`, `"free zone at the moment"`) or ends on a
+ * dangling function word (`"a new gambling licence to online bookmaker"`).
  *
- * Meltwater's own leading `...` is left alone — that's their deliberate truncation marker, and it
- * accounts for the large majority of snippets that start with punctuation.
+ * Two passes, and one glyph: every elision — theirs or ours, leading or trailing — is rendered as a
+ * single `…` (U+2026), so a channel of cards doesn't mix `...` and `…`.
+ *
+ * The head is deliberately conservative: an uppercase start is left alone, because a mid-sentence
+ * proper noun ("Bandt told the ABC…") is indistinguishable from a clean sentence start without
+ * parsing the article we don't have. Only a lowercase/digit start, or visible severed punctuation,
+ * earns a mark.
  */
 export function tidySnippet(text: string | null): string | null {
   if (!text) return text;
-  let s = text.trimStart();
-  if (s.startsWith("...") || s.startsWith("\u2026")) return s; // their own truncation marker
-  // Sentence enders: drop, the next sentence stands on its own.
-  if (/^[.?!]\s/.test(s)) s = s.slice(1).trimStart();
-  // Clause punctuation: we're mid-thought, so mark the elision.
-  else if (/^[,;:]\s/.test(s)) s = `\u2026${s.slice(1).trimStart()}`;
+  const s = tidyTail(tidyHead(text.trim()));
   return s || null;
+}
+
+const ELLIPSIS = "…";
+const DASHES = "-–—";
+
+/** The debris Meltwater leaves at the front: a run of punctuation, then a separator. */
+const SEVERED_RUN = /^[.,;:!?\u2013\u2014\u2026-]+/;
+/**
+ * What can sit between that run and the resumed text: a closing quote, but only when it is
+ * immediately adjacent (`,\u201d he said` \u2014 no space, so it closes rather than opens), then whitespace.
+ * A quote *after* the whitespace is left in place; it is opening the next quotation.
+ */
+const SEVERED_SEP = /^["'\u2019\u201d]?\s*/;
+
+/** Mark a start that is visibly mid-sentence: a lowercase word, a number, or a cut contraction. */
+function lead(s: string): string {
+  return /^[a-z0-9]/.test(s) || /^['\u2019][a-z]/.test(s) ? ELLIPSIS + s : s;
+}
+
+function tidyHead(s: string): string {
+  const run = SEVERED_RUN.exec(s)?.[0] ?? "";
+  if (!run) return lead(s);
+
+  // A truncation marker, theirs or one of ours: normalise the glyph and keep what follows verbatim.
+  // No quote-swallowing here \u2014 an apostrophe after the marker belongs to the word the window cut
+  // into ("\u2026's important to as I say"), and eating it would also make the sweep non-idempotent.
+  if (run.includes(ELLIPSIS) || run.includes("..")) {
+    const rest = s.slice(run.length).trimStart();
+    return rest ? ELLIPSIS + rest : "";
+  }
+
+  const sep = SEVERED_SEP.exec(s.slice(run.length))![0];
+  const rest = s.slice(run.length + sep.length);
+  if (!rest) return "";
+
+  // A severed sentence end. The separator is what proves the mark ended a sentence rather than
+  // opening a word \u2014 without that guard ".NET" and "1.5" get mangled.
+  if (".?!".includes(run[0]!)) {
+    if (!sep) return s; // ".NET developers" \u2014 not severed at all
+    return lead(rest); // the next sentence usually stands on its own; mark it when it doesn't
+  }
+
+  // Clause punctuation, or a hyphen left over from a word split across the window edge.
+  return ELLIPSIS + rest;
+}
+
+function tidyTail(s: string): string {
+  const t = s.trimEnd();
+  if (!t) return "";
+
+  // Their own trailing marker (".." through "....", or an ellipsis they already collapsed).
+  if (/(?:\.{2,}|…)[\s.]*$/.test(t)) return t.replace(/\s*(?:\.{2,}|…)[\s.]*$/, ELLIPSIS);
+
+  // Judge the sentence over any closing quotes/brackets, so `he said."` still reads as complete.
+  const closers = /["'’”)\]]*$/.exec(t)![0];
+  const body = t.slice(0, t.length - closers.length);
+  if (!body) return t;
+
+  const last = body.slice(-1)!;
+  if (".?!".includes(last)) return t; // a whole sentence
+  if (",;:".includes(last) || DASHES.includes(last)) {
+    return body.slice(0, -1).trimEnd() + closers + ELLIPSIS; // cut mid-clause, or mid-word
+  }
+  return t + ELLIPSIS; // a word, a number, or anything else still mid-thought
 }
 
 function toMention(doc: Record<string, Json>, topBrief: string | null): NormalizedMention {
