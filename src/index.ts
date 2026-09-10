@@ -535,7 +535,8 @@ app.post("/slack/commands", async (c) => {
   const userId = form.get("user_id") ?? "";
   if (!userId) return c.text("missing user_id", 400);
   const reply = await handleDigestCommand(c.env, { userId, text: form.get("text") ?? "", nowMs: Date.now() });
-  return c.json({ response_type: "ephemeral", text: reply.text });
+  // `text` is always sent: notifications and table-less clients fall back to it (see buildWhoReply).
+  return c.json({ response_type: "ephemeral", text: reply.text, ...(reply.blocks ? { blocks: reply.blocks } : {}) });
 });
 
 // Cron Triggers (wrangler.jsonc `triggers.crons`), dispatched by controller.cron:

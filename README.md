@@ -404,11 +404,13 @@ with the `/digest` slash command (setup: [The `/digest` slash command](#the-dige
 | `/digest subscribe 7:30` / `6am` / `19:15` | Subscribe (or change the time). Rounded to the nearest 15 minutes |
 | `/digest unsubscribe` | Stop receiving it |
 | `/digest status` (or bare `/digest`) | Show your address, time, zone, last and next send |
+| `/digest who` | The whole roster — a Block Kit table of who's subscribed, at what local time. Addresses are masked (`s•••@example.org`). Deliberately left out of the command's usage hint: not secret, just not worth advertising. `/digest who plain` renders it as plain text instead |
 
 The address is always the caller's **Slack profile email** (`users.info`), so nobody can point the digest
 at an address they don't own; the zone is the profile's `tz`. Subscriptions live in D1
 (`digest_subscribers`, migration 0012). `GET /admin/digest-subscribers` (bearer `REPLAY_KEY`) lists
-them; `/health` reports the count only.
+them and is the one place **full** addresses surface (`/digest who` masks them); `/health` reports the
+count only.
 
 **Schedule.** The quarter-hour cron (`*/15 * * * *`) runs `src/lib/digestSend.ts`, which checks every
 subscriber against *their own* zone's clock: due once their local time has passed the chosen slot and

@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { parseLocalTime, formatLocalTime, nextSendLabel } from "@/lib/slack/commands";
+import {
+  parseLocalTime,
+  formatLocalTime,
+  nextSendLabel,
+  maskEmail,
+  shortZone,
+  buildWhoReply,
+  type Block,
+  type TableCell,
+} from "@/lib/slack/commands";
+import type { Subscriber } from "@/lib/store/subscribers";
 
 describe("parseLocalTime", () => {
   it.each([
@@ -58,5 +68,106 @@ describe("nextSendLabel", () => {
 
   it("flags a pending catch-up when the time has passed but nothing was sent", () => {
     expect(nextSendLabel({ time_zone: TZ, send_minute: 480, last_sent_day: null }, JAN_15_1000)).toMatch(/within the next/);
+  });
+});
+
+describe("maskEmail", () => {
+  it("keeps the first character and the domain", () => {
+    expect(maskEmail("simon@holmesacourt.com")).toBe("s•••@holmesacourt.com");
+    expect(maskEmail("a.long.name@example.org")).toBe("a•••@example.org");
+  });
+
+  it("masks the whole local part when it is a single character", () => {
+    expect(maskEmail("s@example.org")).toBe("•••@example.org");
+  });
+
+  it("gives nothing away for anything that isn't an address", () => {
+    expect(maskEmail("not-an-email")).toBe("•••");
+    expect(maskEmail("@example.org")).toBe("•••");
+  });
+});
+
+describe("shortZone", () => {
+  it("keeps the city and unescapes underscores", () => {
+    expect(shortZone("Australia/Melbourne")).toBe("Melbourne");
+    expect(shortZone("America/New_York")).toBe("New York");
+    expect(shortZone("America/Argentina/Buenos_Aires")).toBe("Buenos Aires");
+    expect(shortZone("UTC")).toBe("UTC");
+  });
+});
+
+describe("buildWhoReply", () => {
+  const sub = (over: Partial<Subscriber> & Pick<Subscriber, "slack_user_id">): Subscriber => ({
+    email: `${over.slack_user_id.toLowerCase()}@example.org`,
+    time_zone: "Australia/Melbourne",
+    send_minute: 480,
+    last_sent_day: null,
+    created_at: 1,
+    updated_at: 1,
+    ...over,
+  });
+  const roster = [
+    sub({ slack_user_id: "U_LATE", send_minute: 19 * 60 }),
+    sub({ slack_user_id: "U_EARLY", send_minute: 420, time_zone: "America/New_York", email: "jane@example.org" }),
+    sub({ slack_user_id: "U_SAME", send_minute: 420, created_at: 9 }),
+  ];
+  const table = (blocks: Block[] | undefined) => blocks?.find((b) => b.type === "table");
+  /** The user_id of a row's mention cell, or null when it isn't one. */
+  const mentioned = (cells: TableCell[]) => {
+    const cell = cells[0];
+    return cell?.type === "rich_text" ? cell.elements[0].elements[0].user_id : null;
+  };
+
+  it("says so when nobody is subscribed, with no table", () => {
+    const r = buildWhoReply([], { paused: false });
+    expect(r.text).toMatch(/Nobody is subscribed/);
+    expect(r.blocks).toBeUndefined();
+  });
+
+  it("orders by local send time, then by how long they've been subscribed", () => {
+    const rows = table(buildWhoReply(roster, { paused: false }).blocks)?.rows ?? [];
+    expect(rows[0]).toEqual([
+      { type: "raw_text", text: "Who" },
+      { type: "raw_text", text: "Time" },
+      { type: "raw_text", text: "Zone" },
+      { type: "raw_text", text: "Email" },
+    ]);
+    expect(rows.slice(1).map(mentioned)).toEqual(["U_EARLY", "U_SAME", "U_LATE"]);
+    expect(rows).toHaveLength(4);
+  });
+
+  it("renders a mention cell, the local time, the city and a masked address", () => {
+    const rows = table(buildWhoReply(roster.slice(1, 2), { paused: false }).blocks)?.rows ?? [];
+    expect(rows[1]).toEqual([
+      { type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "user", user_id: "U_EARLY" }] }] },
+      { type: "raw_text", text: "7:00am" },
+      { type: "raw_text", text: "New York" },
+      { type: "raw_text", text: "j•••@example.org" },
+    ]);
+  });
+
+  it("never leaks a full address, in the table or the fallback text", () => {
+    const r = buildWhoReply(roster, { paused: false });
+    expect(JSON.stringify(r)).not.toContain("jane@example.org");
+    expect(r.text).toContain("<@U_EARLY> — *7:00am* · New York · j•••@example.org");
+    expect(r.text).toMatch(/^\*3 subscribers\*/);
+  });
+
+  it("counts one subscriber in the singular", () => {
+    expect(buildWhoReply(roster.slice(0, 1), { paused: false }).text).toMatch(/^\*1 subscriber\* /);
+  });
+
+  it("adds the paused note only when sending is paused", () => {
+    expect(buildWhoReply(roster, { paused: false }).blocks?.some((b) => b.type === "context")).toBe(false);
+    const paused = buildWhoReply(roster, { paused: true });
+    expect(paused.blocks?.some((b) => b.type === "context")).toBe(true);
+    expect(paused.text).toMatch(/paused server-side/);
+    expect(buildWhoReply([], { paused: true }).text).toMatch(/paused server-side/);
+  });
+
+  it("drops the blocks for `who plain`, keeping the same text", () => {
+    const plain = buildWhoReply(roster, { paused: false, plain: true });
+    expect(plain.blocks).toBeUndefined();
+    expect(plain.text).toBe(buildWhoReply(roster, { paused: false }).text);
   });
 });

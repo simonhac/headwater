@@ -9,6 +9,8 @@ import { DEFAULT_SEND_MINUTE, SLOT_MINUTES, zonedDay, zonedMinuteOfDay } from "@
  *   /digest subscribe [time]   subscribe (or change the time) — time in the user's Slack profile zone
  *   /digest unsubscribe
  *   /digest status             (also the default for bare `/digest` or anything unrecognised)
+ *   /digest who [plain]        the whole roster as a Block Kit table — deliberately absent from
+ *                              USAGE below: not secret, just not worth advertising
  *
  * The email address comes from the Slack profile only (`users.info` → `profile.email`, scope
  * `users:read.email`), so nobody can point the digest at an address they don't own. The zone comes
@@ -21,6 +23,12 @@ const EMAIL_ISH = /^[^\s@]+@[^\s@.]+\.[^\s@]+$/;
 export const USAGE = "Usage: `/digest subscribe [time]` · `/digest unsubscribe` · `/digest status`";
 
 const MINUTES_PER_DAY = 24 * 60;
+
+/** What a subcommand answers with: mrkdwn `text`, plus optional blocks that supersede it. */
+export interface CommandReply {
+  text: string;
+  blocks?: Block[];
+}
 
 /**
  * Parse a local time such as `7`, `7:30`, `7.30`, `7am`, `7:30pm`, `19:15` into minutes after
@@ -61,6 +69,90 @@ export function nextSendLabel(sub: Pick<Subscriber, "time_zone" | "send_minute" 
   if (sub.last_sent_day === today) return `tomorrow at ${at}`;
   if (minute >= sub.send_minute) return `within the next ${SLOT_MINUTES} minutes`;
   return `today at ${at}`;
+}
+
+/* ── `/digest who`: the roster, as a Block Kit table ──────────────────────────────────────────
+ *
+ * Two things shape this rendering:
+ *  - **No Slack API call.** The route has a 3s budget (see src/index.ts), so names come from
+ *    `rich_text` → `user` cells, which each client resolves to a mention when it draws the table.
+ *  - **Masked addresses.** `/admin/digest-subscribers` stays the one place full addresses surface.
+ *
+ * Every reply also carries plain `text`: Slack uses it for notifications and for clients that can't
+ * render the block, so a table that fails to draw degrades to a readable list. `who plain` asks for
+ * that rendering on its own.
+ */
+
+const MASK = "•••";
+const WHO_HEADERS = ["Who", "Time", "Zone", "Email"];
+const PAUSED_ROSTER_NOTE =
+  "Digest sending is currently paused server-side — these subscriptions are saved, but nothing is going out.";
+
+/** `simon@holmesacourt.com` → `s•••@holmesacourt.com`. Enough to recognise, not enough to mail. */
+export function maskEmail(email: string): string {
+  const at = email.lastIndexOf("@");
+  if (at < 1) return MASK;
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  return local.length < 2 ? `${MASK}${domain}` : `${local[0]}${MASK}${domain}`;
+}
+
+/** `Australia/Melbourne` → `Melbourne`; `America/New_York` → `New York`. */
+export function shortZone(tz: string): string {
+  const last = tz.split("/").pop();
+  return last ? last.replace(/_/g, " ") : tz;
+}
+
+/** Roster order: earliest local send time first, then oldest subscription. */
+export function sortSubscribers(subs: Subscriber[]): Subscriber[] {
+  return [...subs].sort((a, b) => a.send_minute - b.send_minute || a.created_at - b.created_at);
+}
+
+/** Minimal shapes for the blocks we emit — hand-rolled, as with SlackAttachment in ./format.ts. */
+export type TableCell =
+  | { type: "raw_text"; text: string }
+  | { type: "rich_text"; elements: [{ type: "rich_text_section"; elements: [{ type: "user"; user_id: string }] }] };
+
+export type Block =
+  | { type: "table"; column_settings?: { align?: "left" | "center" | "right"; is_wrapped?: boolean }[]; rows: TableCell[][] }
+  | { type: "section"; text: { type: "mrkdwn"; text: string } }
+  | { type: "context"; elements: { type: "mrkdwn"; text: string }[] };
+
+function whoRow(sub: Subscriber): TableCell[] {
+  return [
+    { type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "user", user_id: sub.slack_user_id }] }] },
+    { type: "raw_text", text: formatLocalTime(sub.send_minute) },
+    { type: "raw_text", text: shortZone(sub.time_zone) },
+    { type: "raw_text", text: maskEmail(sub.email) },
+  ];
+}
+
+function whoLine(sub: Subscriber): string {
+  return `• <@${sub.slack_user_id}> — *${formatLocalTime(sub.send_minute)}* · ${shortZone(sub.time_zone)} · ${maskEmail(sub.email)}`;
+}
+
+/** The `/digest who` reply. `plain` skips the table and returns the fallback text on its own. */
+export function buildWhoReply(subs: Subscriber[], opts: { paused: boolean; plain?: boolean }): CommandReply {
+  const pausedLine = opts.paused ? `_(${PAUSED_ROSTER_NOTE})_` : "";
+  if (subs.length === 0) {
+    return { text: ["Nobody is subscribed to the daily digest yet.", pausedLine].filter(Boolean).join("\n") };
+  }
+
+  const ordered = sortSubscribers(subs);
+  const heading = `*${ordered.length} subscriber${ordered.length === 1 ? "" : "s"}* to the daily digest`;
+  const text = [heading, ...ordered.map(whoLine), pausedLine].filter(Boolean).join("\n");
+  if (opts.plain) return { text };
+
+  const blocks: Block[] = [
+    { type: "section", text: { type: "mrkdwn", text: heading } },
+    {
+      type: "table",
+      column_settings: [{}, { align: "right" }, {}, {}],
+      rows: [WHO_HEADERS.map((h): TableCell => ({ type: "raw_text", text: h })), ...ordered.map(whoRow)],
+    },
+  ];
+  if (opts.paused) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: PAUSED_ROSTER_NOTE }] });
+  return { text, blocks };
 }
 
 interface SlackUser {
@@ -115,7 +207,7 @@ function statusText(sub: Subscriber | null, env: Env, nowMs: number): string {
 export async function handleDigestCommand(
   env: Env,
   p: { userId: string; text: string; nowMs: number },
-): Promise<{ text: string }> {
+): Promise<CommandReply> {
   const { userId, nowMs } = p;
   const [verb = "", ...rest] = p.text.trim().split(/\s+/).filter(Boolean);
   const store = new SubscriberStore(env.DB);
@@ -161,6 +253,11 @@ export async function handleDigestCommand(
             `(${who.tz})${notes.length ? " " + notes.join(" ") : ""}. First one: ${nextSendLabel(sub, nowMs)}.` +
             pausedNote(env),
         };
+      }
+      case "who":
+      case "list": {
+        const plain = /^(plain|text)$/i.test(rest[0] ?? "");
+        return buildWhoReply(await store.all(), { paused: env.DIGEST_ENABLED !== "true", plain });
       }
       case "unsubscribe":
       case "unsub":

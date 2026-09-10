@@ -218,6 +218,41 @@ describe("digest subscribers", () => {
       expect(await store.get("U_ONE")).toBeNull();
     });
 
+    it("lists the whole roster, in local-time order, without a Slack call", async () => {
+      // The fetch stub throws on anything but users.info/Resend, so reaching this far also proves
+      // `who` stays inside the 3s slash-command budget: no API call at all.
+      await store.upsert({ slack_user_id: "U_LATE", email: "late@example.org", time_zone: TZ, send_minute: 19 * 60, last_sent_day: null }, 1);
+      await store.upsert(
+        { slack_user_id: "U_EARLY", email: "early@example.org", time_zone: "America/New_York", send_minute: 420, last_sent_day: null },
+        2,
+      );
+
+      const r = await cmd("who", MEL_8AM);
+      const table = r.blocks?.find((b) => b.type === "table");
+      expect(table?.rows.map((cells) => cells.map((c) => (c.type === "raw_text" ? c.text : "@")))).toEqual([
+        ["Who", "Time", "Zone", "Email"],
+        ["@", "7:00am", "New York", "e•••@example.org"],
+        ["@", "7:00pm", "Melbourne", "l•••@example.org"],
+      ]);
+      expect(r.text).toContain("*2 subscribers*");
+      expect(JSON.stringify(r)).not.toContain("early@example.org");
+    });
+
+    it("returns text only for `who plain`, and says so when nobody is subscribed", async () => {
+      expect((await cmd("who", MEL_8AM)).text).toContain("Nobody is subscribed");
+
+      await store.upsert({ slack_user_id: "U_ONE", email: "u_one@example.org", time_zone: TZ, send_minute: 450, last_sent_day: null }, 1);
+      const r = await cmd("who plain", MEL_8AM);
+      expect(r.blocks).toBeUndefined();
+      expect(r.text).toContain("<@U_ONE> — *7:30am* · Melbourne · u•••@example.org");
+    });
+
+    it("notes when sending is paused", async () => {
+      await store.upsert({ slack_user_id: "U_ONE", email: "u_one@example.org", time_zone: TZ, send_minute: 450, last_sent_day: null }, 1);
+      const r = await handleDigestCommand({ ...digestEnv, DIGEST_ENABLED: "false" }, { userId: "U_ONE", text: "who", nowMs: MEL_8AM });
+      expect(r.blocks?.some((b) => b.type === "context")).toBe(true);
+    });
+
     it("explains a missing scope rather than failing silently", async () => {
       vi.stubGlobal(
         "fetch",
@@ -270,6 +305,18 @@ describe("digest subscribers", () => {
 
       const status = (await (await slash("status")).json()) as { text: string };
       expect(status.text).toContain("subscribed as *u_one@example.org*");
+    });
+
+    it("forwards the roster blocks alongside the fallback text", async () => {
+      await store.upsert({ slack_user_id: "U_ONE", email: "u_one@example.org", time_zone: TZ, send_minute: 450, last_sent_day: null }, 1);
+      const body = (await (await slash("who")).json()) as { response_type: string; text: string; blocks?: { type: string }[] };
+      expect(body.response_type).toBe("ephemeral");
+      expect(body.blocks?.map((b) => b.type)).toEqual(["section", "table"]);
+      expect(body.text).toContain("<@U_ONE>");
+
+      const plain = (await (await slash("who plain")).json()) as { text: string; blocks?: unknown[] };
+      expect(plain.blocks).toBeUndefined();
+      expect(plain.text).toContain("<@U_ONE>");
     });
   });
 });
