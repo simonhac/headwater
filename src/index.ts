@@ -32,6 +32,7 @@ import { runDigestSend } from "@/lib/digestSend";
 import { SubscriberStore } from "@/lib/store/subscribers";
 import { verifySlackSignature } from "@/lib/slack/verify";
 import { handleDigestCommand } from "@/lib/slack/commands";
+import { pingHeartbeatUrl } from "@/lib/pingHeartbeat";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -101,14 +102,20 @@ app.get("/health", async (c) => {
   // Drift gauge over the last DRIFT_WINDOW_MS: `errors` = failed/threw events, `unposted` =
   // archived-but-never-delivered. Non-zero counts that don't drain across reconcile ticks = drift.
   let drift: { errors: number; unposted: number } | null = null;
+  // A dead database used to be INVISIBLE here: the catch swallowed it and the route still returned
+  // 200 with drift:null, so an uptime monitor stayed green through it. It now fails the check.
+  // This is what lets ONE keyword monitor cover both config breakage and a dead DB — BetterStack's
+  // `keyword` type requires a 2xx *and* the keyword.
+  let dbOk = true;
   try {
     const log = new EventLog(c.env.DB);
     const row = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM webhook_events`).first<{ n: number }>();
     count = row?.n ?? 0;
     drift = await log.driftCounts(Date.now() - DRIFT_WINDOW_MS);
     subscribers = await new SubscriberStore(c.env.DB).count();
-  } catch {
-    /* DB not migrated yet */
+  } catch (e) {
+    dbOk = false;
+    console.error(`[health] database unreadable: ${String(e)}`);
   }
   // Format-validate the runtime env + saved routing (never leaks values, and channel ids are
   // treated as secret). Only the `configOk` boolean is public.
@@ -134,7 +141,8 @@ app.get("/health", async (c) => {
     },
     // How many distinct channels the feed fans out to (count only — ids are secret). 1 = default only.
     channels: configuredChannels(routing, c.env).length,
-  });
+    dbOk,
+  }, dbOk ? 200 : 503);
 });
 
 // --- inbound Meltwater Generic Webhook ---
@@ -551,8 +559,35 @@ export default {
   fetch: app.fetch,
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     if (controller.cron === "0 * * * *") {
-      ctx.waitUntil(runHeartbeat(env, Date.now()).catch(() => {}));
-      ctx.waitUntil(heal(env).catch((e) => console.error(`[heal] failed: ${String(e)}`)));
+      // ONE waitUntil so the pings are inside the same keep-alive as the work they report on.
+      // Previously these were two independent waitUntil calls with no ping; an un-awaited fetch
+      // added afterwards would have been cancelled the moment the handler returned, and the
+      // heartbeat would have read dead while the Worker was fine.
+      ctx.waitUntil(
+        (async () => {
+          // runHeartbeat resolving at all requires a successful D1 read (latestMentionReceivedAt),
+          // so a resolved result IS the liveness evidence — this is deliberately not "the cron
+          // fired", which would stay green with the database dead.
+          let hb: Awaited<ReturnType<typeof runHeartbeat>> | null = null;
+          try {
+            hb = await runHeartbeat(env, Date.now());
+          } catch (e) {
+            console.error(`[heartbeat] failed: ${String(e)}`);
+          }
+          try {
+            await heal(env);
+          } catch (e) {
+            console.error(`[heal] failed: ${String(e)}`);
+          }
+
+          if (env.HW_HOURLY_HEARTBEAT_URL && hb) await pingHeartbeatUrl(env.HW_HOURLY_HEARTBEAT_URL);
+
+          // Narrower on purpose: ingestion is actually flowing, not merely "the tick ran". This is
+          // the same verdict the in-Worker Slack alert uses, so a broken Slack app can no longer
+          // hide a stall — the failure mode of the 2026-07 26-hour outage.
+          if (env.HW_INGEST_HEARTBEAT_URL && hb?.healthy) await pingHeartbeatUrl(env.HW_INGEST_HEARTBEAT_URL);
+        })(),
+      );
     } else {
       // Reconcile, THEN backstop the drainer (in case an enqueue's poke was lost), THEN the digest
       // send — so anyone due this tick gets a window that includes what reconcile just healed. One

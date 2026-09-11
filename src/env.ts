@@ -52,6 +52,19 @@ export interface Env {
   /** Channel for heartbeat alerts; falls back to SLACK_DEFAULT_CHANNEL. */
   SLACK_ALERT_CHANNEL?: string;
 
+  // --- external dead-man's switches (BetterStack). UNSET MEANS OFF, so `wrangler dev` and any
+  // preview can never keep production's monitors green. Both are pinged from the hourly cron
+  // branch only, and both are AWAITED inside ctx.waitUntil — a Worker may be torn down the moment
+  // its handler returns, which would cancel an un-awaited fetch and make the heartbeat read dead
+  // while the Worker is perfectly fine. ---
+  /** Pinged when the hourly tick COMPLETED and D1 was readable. Catches: Worker deleted, broken
+   *  deploy, cron trigger removed, D1 dead, account suspended. ~2 h to alarm. */
+  HW_HOURLY_HEARTBEAT_URL?: string;
+  /** Pinged only when decideHeartbeat() returns healthy — i.e. ingestion is actually flowing.
+   *  Externalises the in-Worker Slack alert, so a broken Slack app can no longer hide a stall.
+   *  That is the shape of the 26-hour outage in 2026-07. */
+  HW_INGEST_HEARTBEAT_URL?: string;
+
   // --- daily digest email (src/lib/digestSend.ts), delivered via Resend (src/lib/mailer.ts).
   // Cloudflare Email Sending would have needed Workers Paid on the account owning the sending
   // domain — a second subscription — while the sending domain is already verified in Resend. ---

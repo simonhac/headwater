@@ -101,3 +101,47 @@ dropped"; P1 items are defense-in-depth.**
 ---
 _Note: the repo also has a `doc/` (singular) directory (`doc/added-by.md`). This file was created at
 `docs/` as requested; consider consolidating to one location._
+
+## External monitoring (2026-09-12)
+
+Everything above is *internal*: it runs inside the Worker. That is the same shape as the failure
+that made liveone's 2026-09-11 outage silent for 8h20m — *"every check that watched LiveOne ran
+inside LiveOne and queried the database it was judging."* headwater's own ingestion heartbeat posts
+to Slack from inside the Worker, so a dead Worker, a deleted cron trigger, or an uninstalled Slack
+app all produce silence rather than an alert. That is what these close.
+
+### `GET /health` can now fail
+
+It previously caught a database error and still returned **200** with `drift: null`, so an uptime
+monitor stayed green through a dead D1. It now returns **503** with `dbOk: false`, keeping the full
+body shape so a keyword assertion remains meaningful rather than merely absent.
+
+This is what lets a single BetterStack `keyword` monitor on `"configOk":true` cover both config
+breakage *and* a dead database — the `keyword` type requires a 2xx **and** the keyword.
+
+### Two heartbeats, both unset-means-off
+
+| secret | pings when | catches |
+| --- | --- | --- |
+| `HW_HOURLY_HEARTBEAT_URL` | the hourly tick completed **and** D1 was readable | Worker deleted, broken deploy, cron trigger removed, D1 dead, account suspended (~2 h) |
+| `HW_INGEST_HEARTBEAT_URL` | `decideHeartbeat()` returned `healthy` | ingestion stalled — externalised, so a broken Slack app can no longer hide it |
+
+`runHeartbeat` resolving at all requires a successful D1 read, so a resolved result *is* the
+liveness evidence. Neither ping is "the cron fired", which would stay green with the database dead.
+
+### Why the hourly branch is one `waitUntil`
+
+It used to be two independent `ctx.waitUntil()` calls. A Worker may be torn down the moment its
+handler returns, which cancels an un-awaited fetch — so a ping added alongside them would have been
+killed, and the heartbeat would have read dead while the Worker was perfectly fine. The pings are
+now awaited inside the same keep-alive as the work they report on.
+
+### Still not covered
+
+- ~27 h to alarm on an ingestion stall, because `HEARTBEAT_MAX_SILENCE_HOURS` defaults to 24.
+  Measure the p99 inter-arrival gap of `webhook_events.received_at` and lower it.
+- The `*/15` reconcile tick has no heartbeat: it is self-healing and a missed tick is harmless, so
+  one would page for a benign skip. The failure that matters (reconcile wedged) shows up as
+  `drift.unposted` climbing, which nothing yet asserts on — a `driftOk` boolean on `/health` is the
+  right shape once the normal distribution is known.
+- Nothing monitors the monitor.
