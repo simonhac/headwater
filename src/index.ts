@@ -559,32 +559,41 @@ export default {
   fetch: app.fetch,
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     if (controller.cron === "0 * * * *") {
-      // ONE waitUntil so the pings are inside the same keep-alive as the work they report on.
-      // Previously these were two independent waitUntil calls with no ping; an un-awaited fetch
-      // added afterwards would have been cancelled the moment the handler returned, and the
-      // heartbeat would have read dead while the Worker was fine.
+      // One waitUntil, but the two jobs still run CONCURRENTLY. An earlier version awaited them in
+      // sequence, which quietly removed the failure isolation the two separate waitUntil calls had:
+      // runHeartbeat's alert path calls slackFetch, which has no timeout and honours an uncapped
+      // Retry-After, so a PENDING heartbeat would have blocked the healer indefinitely — and a
+      // pending healer would have blocked both pings even with ingestion healthy and D1 readable.
+      //
+      // (The reason given for collapsing them was wrong: multiple registered waitUntil promises are
+      // all kept alive. The real requirement is only that the ping sits inside a REGISTERED promise,
+      // because an un-awaited fetch is cancelled the moment the handler returns.)
       ctx.waitUntil(
         (async () => {
-          // runHeartbeat resolving at all requires a successful D1 read (latestMentionReceivedAt),
-          // so a resolved result IS the liveness evidence — this is deliberately not "the cron
-          // fired", which would stay green with the database dead.
-          let hb: Awaited<ReturnType<typeof runHeartbeat>> | null = null;
-          try {
-            hb = await runHeartbeat(env, Date.now());
-          } catch (e) {
-            console.error(`[heartbeat] failed: ${String(e)}`);
+          const [hbResult] = await Promise.allSettled([
+            runHeartbeat(env, Date.now()),
+            heal(env).catch((e) => {
+              console.error(`[heal] failed: ${String(e)}`);
+            }),
+          ]);
+          if (hbResult.status === "rejected") {
+            console.error(`[heartbeat] failed: ${String(hbResult.reason)}`);
           }
-          try {
-            await heal(env);
-          } catch (e) {
-            console.error(`[heal] failed: ${String(e)}`);
-          }
+          const hb = hbResult.status === "fulfilled" ? hbResult.value : null;
 
+          // What this ping actually proves, stated precisely: the hourly handler ran AND
+          // runHeartbeat completed, which requires successful D1 reads (latestMentionReceivedAt and
+          // the ops-state read) — so it catches a dead Worker, a removed cron trigger, a broken
+          // deploy and a dead D1. It deliberately does NOT gate on heal(): the healer is a
+          // best-effort re-render whose failure is not a liveness failure, and gating on it would
+          // let a failed Slack update silence the liveness signal.
           if (env.HW_HOURLY_HEARTBEAT_URL && hb) await pingHeartbeatUrl(env.HW_HOURLY_HEARTBEAT_URL);
 
-          // Narrower on purpose: ingestion is actually flowing, not merely "the tick ran". This is
-          // the same verdict the in-Worker Slack alert uses, so a broken Slack app can no longer
-          // hide a stall — the failure mode of the 2026-07 26-hour outage.
+          // Narrower: a qualifying mention was RECEIVED within HEARTBEAT_MAX_SILENCE_HOURS (default
+          // 24). Note what that is not — it is mention ARRIVAL, not successful Slack delivery, so a
+          // feed that ingests fine while every post fails still reads healthy. It is the same
+          // verdict the in-Worker Slack alert uses, and externalising it means a broken Slack app
+          // can no longer hide a stall, which is the shape of the 2026-07 26-hour outage.
           if (env.HW_INGEST_HEARTBEAT_URL && hb?.healthy) await pingHeartbeatUrl(env.HW_INGEST_HEARTBEAT_URL);
         })(),
       );

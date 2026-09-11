@@ -123,11 +123,26 @@ breakage *and* a dead database — the `keyword` type requires a 2xx **and** the
 
 | secret | pings when | catches |
 | --- | --- | --- |
-| `HW_HOURLY_HEARTBEAT_URL` | the hourly tick completed **and** D1 was readable | Worker deleted, broken deploy, cron trigger removed, D1 dead, account suspended (~2 h) |
+| `HW_HOURLY_HEARTBEAT_URL` | the hourly handler ran **and** `runHeartbeat` completed | Worker deleted, broken deploy, cron trigger removed, D1 dead, account suspended (~2 h) |
 | `HW_INGEST_HEARTBEAT_URL` | `decideHeartbeat()` returned `healthy` | ingestion stalled — externalised, so a broken Slack app can no longer hide it |
 
-`runHeartbeat` resolving at all requires a successful D1 read, so a resolved result *is* the
-liveness evidence. Neither ping is "the cron fired", which would stay green with the database dead.
+`runHeartbeat` resolving requires successful D1 reads (`latestMentionReceivedAt` and the ops-state
+read), so a resolved result *is* the liveness evidence. Neither ping is "the cron fired", which would
+stay green with the database dead.
+
+**Be precise about what each one does not mean.** The hourly ping deliberately does **not** gate on
+`heal()`: the healer is a best-effort re-render, its failure is not a liveness failure, and gating on
+it would let a failed Slack update silence the liveness signal. And the ingest ping means a
+qualifying mention was **received** within `HEARTBEAT_MAX_SILENCE_HOURS` — that is mention *arrival*,
+not successful Slack *delivery*, so a feed that ingests fine while every post fails still reads
+healthy. Posting failures surface as `drift.errors`, not here.
+
+The two hourly jobs run **concurrently** inside one `waitUntil`. They must not be awaited in
+sequence: `runHeartbeat`'s alert path calls `slackFetch`, which has no timeout and honours an
+uncapped `Retry-After`, so a pending heartbeat would block the healer indefinitely — and a pending
+healer would block both pings even with ingestion healthy. Multiple registered `waitUntil` promises
+are all kept alive; the only real requirement is that a ping sits inside a *registered* promise,
+because an un-awaited fetch is cancelled the moment the handler returns.
 
 ### Why the hourly branch is one `waitUntil`
 

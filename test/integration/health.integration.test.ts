@@ -45,12 +45,38 @@ describe("GET /health", () => {
   });
 
   it("leaks no secret values", async () => {
-    // The repo is PUBLIC and channel ids are treated as secret. `configured` is booleans only.
-    const res = await get("/health", env);
-    const body = (await res.json()) as Record<string, unknown>;
+    // The repo is PUBLIC and channel ids are treated as infrastructure detail, not just the tokens.
+    // An earlier version of this test only grepped for "xoxb-", which would have missed a leaked
+    // channel id, webhook secret or heartbeat URL entirely — so assert against the ACTUAL configured
+    // values, which is the only form of this check that can fail for the right reason.
+    const secretEnv = {
+      ...env,
+      SLACK_BOT_TOKEN: "xoxb-test-token-value",
+      SLACK_DEFAULT_CHANNEL: "C0SECRETCHANNEL",
+      WEBHOOK_SHARED_SECRET: "webhook-shared-secret-value",
+      REPLAY_KEY: "replay-key-value",
+      ACCESS_AUD: "access-aud-value",
+      HW_HOURLY_HEARTBEAT_URL: "https://uptime.betterstack.com/api/v1/heartbeat/secret-hourly",
+      HW_INGEST_HEARTBEAT_URL: "https://uptime.betterstack.com/api/v1/heartbeat/secret-ingest",
+    } as unknown as typeof env;
+
+    const res = await get("/health", secretEnv);
+    const raw = await res.text();
+    for (const secret of [
+      "xoxb-test-token-value",
+      "C0SECRETCHANNEL",
+      "webhook-shared-secret-value",
+      "replay-key-value",
+      "access-aud-value",
+      "secret-hourly",
+      "secret-ingest",
+    ]) {
+      expect(raw, `/health leaked ${secret}`).not.toContain(secret);
+    }
+
+    const body = JSON.parse(raw) as Record<string, unknown>;
     const configured = body.configured as Record<string, unknown>;
     for (const v of Object.values(configured)) expect(typeof v).toBe("boolean");
     expect(typeof body.channels).toBe("number");
-    expect(JSON.stringify(body)).not.toContain("xoxb-");
   });
 });
