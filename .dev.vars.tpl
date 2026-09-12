@@ -1,35 +1,64 @@
-# 1Password-backed template for local wrangler-dev + /admin/* secrets.
-# Regenerate the gitignored `.dev.vars` from the vault (uses the my.1password.com desktop session):
+# 1Password-backed template for local `wrangler dev`. Regenerate the gitignored `.dev.vars` with:
 #
-#   op inject --account my.1password.com -i .dev.vars.tpl -o .dev.vars
+#   op inject -i .dev.vars.tpl -o .dev.vars --force
 #
-# Source of truth: 1Password vault `headwater-prod`, item `env` — one field per var (label = var name).
-# This template holds ONLY 1Password references (no secret values), so it is safe to commit. `.dev.vars`
-# is gitignored. Disposition map: infra-setup `config/headwater.json`.
-# NOTE: op inject resolves references ANYWHERE in this file (comments included) — never write the
-# reference scheme in prose here unless that field exists in the vault.
+# Conductor does it for you: env/workspace.config.yaml runs the `opInjectEnv` phase under the
+# read-only service account op-sa-headwater-dev, which can read exactly ONE vault: `headwater-dev`.
+#
+# Source of truth for LOCAL dev: 1Password vault `headwater-dev`, item `env`. The deployed Worker's
+# real secrets live in the headwater-prod vault and are delivered with `wrangler secret put`. This
+# file must never reference that vault — a laptop is its own secret environment, so a dev value is a
+# throwaway or a deliberate blank, never a copy of production's. (Pointing this template at the prod
+# vault is exactly what broke Conductor setup between 2026-08-07 and 2026-09-12.)
+#
+# TWO TRAPS, both load-bearing:
+#   1. `op inject` resolves references ANYWHERE in this file, comments included — never write the
+#      reference scheme in prose unless that field really exists in `headwater-dev`.
+#   2. Naming a field the vault does not have fails the WHOLE inject, not just that line. Only the
+#      two fields below may appear as references.
+#
+# The blanks are deliberate, and each one is a guard:
+#   SLACK_BOT_TOKEN       blank -> every Slack call short-circuits `no_slack_token`, so a worktree
+#                         is structurally incapable of posting to the live channel. The pipeline
+#                         still parses, filters and renders the Block Kit preview in /inspect.
+#   SLACK_SIGNING_SECRET  blank -> POST /slack/commands answers 503. Correct: no Slack app points
+#                         at localhost.
+#   RESEND_API_KEY        blank -> the mailer is unconfigured, so no digest can be sent. LOAD-
+#                         BEARING: wrangler.jsonc commits DIGEST_ENABLED "true" and `wrangler dev`
+#                         reads vars too, so DIGEST_ENABLED=false below is the second guard.
+#   ACCESS_TEAM_DOMAIN /  unused locally, because DEV_SKIP_ACCESS=true and `wrangler dev` has no
+#   ACCESS_AUD            Cloudflare Access in front of it.
+#
+# Consequence: `GET /health` reads configOk:false locally, naming SLACK_BOT_TOKEN and
+# SLACK_DEFAULT_CHANNEL as missing. That is correct on a laptop, not a fault to fix.
+#
+# Not here at all: the dead-man's-switch / heartbeat URLs a deployment might carry. Unset means off,
+# and off is the only safe setting outside production.
 
-# The auth token embedded in the webhook URL (POST /webhooks/meltwater/<this>).
-WEBHOOK_SHARED_SECRET=op://headwater-prod/env/WEBHOOK_SHARED_SECRET
+# The auth token embedded in the webhook URL (POST /webhooks/meltwater/<this>). Local throwaway:
+# it authenticates nothing external and gates only this laptop's own webhook path.
+WEBHOOK_SHARED_SECRET=op://headwater-dev/env/WEBHOOK_SHARED_SECRET
 
-# Bearer token for the /admin/* endpoints (Authorization: Bearer <this>).
-REPLAY_KEY=op://headwater-prod/env/REPLAY_KEY
+# Bearer token for the /admin/* endpoints (Authorization: Bearer <this>). Local throwaway, as above.
+# Aiming the package.json admin scripts at production needs the PROD value instead, fetched per
+# invocation under your own 1Password session — never from the Keychain service account.
+REPLAY_KEY=op://headwater-dev/env/REPLAY_KEY
 
-# Slack bot token (xoxb-…) with chat:write.
-SLACK_BOT_TOKEN=op://headwater-prod/env/SLACK_BOT_TOKEN
-# Slack channel id (e.g. C0123ABCD).
-SLACK_DEFAULT_CHANNEL=op://headwater-prod/env/SLACK_DEFAULT_CHANNEL
-# Slack app Signing Secret (Basic Information) — verifies the /digest slash command on /slack/commands.
-SLACK_SIGNING_SECRET=op://headwater-prod/env/SLACK_SIGNING_SECRET
+# Slack — blank locally (see above). To exercise posting, paste a real xoxb- token and channel id
+# into .dev.vars by hand; it is gitignored, and this template will overwrite them on the next inject.
+SLACK_BOT_TOKEN=
+SLACK_DEFAULT_CHANNEL=
+SLACK_SIGNING_SECRET=
 
-# Daily digest email, delivered via Resend. The key is a send-only Resend key (it cannot list
-# domains); DIGEST_FROM must sit on a Resend-verified sending domain.
-RESEND_API_KEY=op://headwater-prod/env/RESEND_API_KEY
-DIGEST_FROM=op://headwater-prod/env/DIGEST_FROM
+# Daily digest email (Resend) — blank, plus the master switch off, so a laptop can never mail
+# subscribers. Recipients are not env: they subscribe from Slack with `/digest subscribe [time]`.
+DIGEST_ENABLED=false
+RESEND_API_KEY=
+DIGEST_FROM=
 
-# Cloudflare Access identifiers (verify the Access JWT on /inspect + /api). Not secrets, but vault-held.
-ACCESS_TEAM_DOMAIN=op://headwater-prod/env/ACCESS_TEAM_DOMAIN
-ACCESS_AUD=op://headwater-prod/env/ACCESS_AUD
+# Cloudflare Access identifiers — blank locally; see DEV_SKIP_ACCESS below.
+ACCESS_TEAM_DOMAIN=
+ACCESS_AUD=
 
 # Local dev ONLY — opens /inspect + /api locally (wrangler dev has no Access in front). Never in prod.
 DEV_SKIP_ACCESS=true
