@@ -45,25 +45,14 @@ export interface Env {
   REPLAY_KEY?: string;
 
   // --- ingestion heartbeat (all optional; sensible defaults in src/lib/heartbeat.ts) ---
-  /** Alert if no webhook has arrived in this many hours (default 24). */
+  /** Escape hatch for the stall threshold: when set it overrides BOTH days with this one flat
+   *  value. Unset (the normal case) means the measured time-of-week default — 16h on a weekday,
+   *  24h at the weekend (src/lib/heartbeat.ts). */
   HEARTBEAT_MAX_SILENCE_HOURS?: string;
   /** While a stall persists, re-alert at most once per this many hours (default 6). */
   HEARTBEAT_REALERT_HOURS?: string;
   /** Channel for heartbeat alerts; falls back to SLACK_DEFAULT_CHANNEL. */
   SLACK_ALERT_CHANNEL?: string;
-
-  // --- external dead-man's switches (BetterStack). UNSET MEANS OFF, so `wrangler dev` and any
-  // preview can never keep production's monitors green. Both are pinged from the hourly cron
-  // branch only, and both are AWAITED inside ctx.waitUntil — a Worker may be torn down the moment
-  // its handler returns, which would cancel an un-awaited fetch and make the heartbeat read dead
-  // while the Worker is perfectly fine. ---
-  /** Pinged when the hourly tick COMPLETED and D1 was readable. Catches: Worker deleted, broken
-   *  deploy, cron trigger removed, D1 dead, account suspended. ~2 h to alarm. */
-  HW_HOURLY_HEARTBEAT_URL?: string;
-  /** Pinged only when decideHeartbeat() returns healthy — i.e. ingestion is actually flowing.
-   *  Externalises the in-Worker Slack alert, so a broken Slack app can no longer hide a stall.
-   *  That is the shape of the 26-hour outage in 2026-07. */
-  HW_INGEST_HEARTBEAT_URL?: string;
 
   // --- daily digest email (src/lib/digestSend.ts), delivered via Resend (src/lib/mailer.ts).
   // Cloudflare Email Sending would have needed Workers Paid on the account owning the sending

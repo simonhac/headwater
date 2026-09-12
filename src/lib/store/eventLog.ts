@@ -131,11 +131,17 @@ export class EventLog {
     return res.results ?? [];
   }
 
-  /** Epoch-ms of the most recent inbound webhook that parsed into a real mention (its `source`
-   *  is populated only once the pipeline processes a mention). Backs the heartbeat: unlike a raw
-   *  MAX(received_at) this ignores non-mention POSTs — empty-body probes, health pings, malformed
-   *  bodies — so they can't reset the ingestion-stall clock and mask a genuine upstream outage. */
-  async latestMentionReceivedAt(): Promise<number | null> {
+  /**
+   * Epoch-ms of the most recent inbound webhook that parsed into a real mention. Named for what it
+   * actually measures: `source` is NULL at append() time and set only by markProcessed(), so this
+   * requires successful PROCESSING, not mere arrival — the old name (`latestMentionReceivedAt`)
+   * implied the opposite and made a dead queue consumer indistinguishable from a silent upstream.
+   * Pair it with `lastReceivedAt` from healthGauges() to tell those two apart.
+   *
+   * Backs the stall check: unlike a raw MAX(received_at) it ignores non-mention POSTs — empty-body
+   * probes, health pings, malformed bodies — so they can't reset the clock and mask an outage.
+   */
+  async latestProcessedMentionAt(): Promise<number | null> {
     const row = await this.db
       .prepare(`SELECT MAX(received_at) AS m FROM webhook_events WHERE source IS NOT NULL`)
       .first<{ m: number | null }>();
@@ -195,6 +201,46 @@ export class EventLog {
       .bind(sinceMs)
       .first<{ errors: number; unposted: number }>();
     return { errors: row?.errors ?? 0, unposted: row?.unposted ?? 0 };
+  }
+
+  /**
+   * Every gauge `/health` asserts on, in ONE pass over the table — the endpoint is polled every
+   * 180s by the uptime monitor, so this replaces what used to be a bare COUNT(*) rather than adding
+   * a scan. Windows are passed in (never hardcoded here) so they stay derived from the cron and
+   * reconcile constants that define them.
+   *
+   *   - `lastReceivedAt`  arrival, unfiltered.
+   *   - `lastProcessedAt` arrival time of the newest event that finished processing. Recent
+   *     received + stale processed is an unambiguous "our pipeline is broken", available in minutes.
+   *   - `unprocessed`     still `decision='logged'` (the value append() writes) inside the window
+   *     and older than the grace: arrived, never processed, and reconcile hasn't healed it either.
+   *   - `stuckFailures`   failed/undelivered past the point where reconcile could still heal them.
+   */
+  async healthGauges(w: {
+    unprocessedSinceMs: number;
+    unprocessedUntilMs: number;
+    stuckSinceMs: number;
+    stuckUntilMs: number;
+  }): Promise<{ events: number; lastReceivedAt: number | null; lastProcessedAt: number | null; unprocessed: number; stuckFailures: number }> {
+    const row = await this.db
+      .prepare(
+        `SELECT
+           COUNT(*) AS events,
+           MAX(received_at) AS last_received,
+           MAX(CASE WHEN source IS NOT NULL THEN received_at END) AS last_processed,
+           COALESCE(SUM(CASE WHEN decision = 'logged' AND received_at >= ?1 AND received_at < ?2 THEN 1 ELSE 0 END), 0) AS unprocessed,
+           COALESCE(SUM(CASE WHEN ${FAILED_PREDICATE} AND received_at >= ?3 AND received_at < ?4 THEN 1 ELSE 0 END), 0) AS stuck
+         FROM webhook_events`,
+      )
+      .bind(w.unprocessedSinceMs, w.unprocessedUntilMs, w.stuckSinceMs, w.stuckUntilMs)
+      .first<{ events: number; last_received: number | null; last_processed: number | null; unprocessed: number; stuck: number }>();
+    return {
+      events: row?.events ?? 0,
+      lastReceivedAt: row?.last_received ?? null,
+      lastProcessedAt: row?.last_processed ?? null,
+      unprocessed: row?.unprocessed ?? 0,
+      stuckFailures: row?.stuck ?? 0,
+    };
   }
 
   async get(id: string): Promise<WebhookEventRecord | null> {

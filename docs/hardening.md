@@ -102,61 +102,112 @@ dropped"; P1 items are defense-in-depth.**
 _Note: the repo also has a `doc/` (singular) directory (`doc/added-by.md`). This file was created at
 `docs/` as requested; consider consolidating to one location._
 
-## External monitoring (2026-09-12)
+## External monitoring (2026-09-12, revised same day)
 
 Everything above is *internal*: it runs inside the Worker. That is the same shape as the failure
 that made liveone's 2026-09-11 outage silent for 8h20m — *"every check that watched LiveOne ran
 inside LiveOne and queried the database it was judging."* headwater's own ingestion heartbeat posts
 to Slack from inside the Worker, so a dead Worker, a deleted cron trigger, or an uninstalled Slack
-app all produce silence rather than an alert. That is what these close.
+app all produce silence rather than an alert. That is what this closes.
 
-### `GET /health` can now fail
+### `/health` is the single assertion point
 
-It previously caught a database error and still returned **200** with `drift: null`, so an uptime
-monitor stayed green through a dead D1. It now returns **503** with `dbOk: false`, keeping the full
-body shape so a keyword assertion remains meaningful rather than merely absent.
+One BetterStack `keyword` monitor (4921263) polls `https://feed.moofer.com/health` every 180 s and
+requires a 2xx **and** the literal `"configOk":true`. Verified empirically on 2026-09-12 — by
+pointing a throwaway monitor at a 503 that still contained the keyword, which went `down` — and
+**not** documented by BetterStack. It is the mechanism everything here rests on: *any* condition
+that makes `/health` non-2xx is caught in ~6 minutes, with no new monitoring resource.
 
-This is what lets a single BetterStack `keyword` monitor on `"configOk":true` cover both config
-breakage *and* a dead database — the `keyword` type requires a 2xx **and** the keyword.
+So every fault below is surfaced by failing `/health` closed rather than by adding a heartbeat. A
+heartbeat's detection floor is its own period (1 h here); the monitor's is 180 s. Converting
+improves detection roughly **20x** while consuming zero heartbeat slots — which matters, the account
+is at its 10-heartbeat quota.
 
-### Two heartbeats, both unset-means-off
-
-| secret | pings when | catches |
+| check | fails when | catches |
 | --- | --- | --- |
-| `HW_HOURLY_HEARTBEAT_URL` | the hourly handler ran **and** `runHeartbeat` completed | Worker deleted, broken deploy, cron trigger removed, D1 dead, account suspended (~2 h) |
-| `HW_INGEST_HEARTBEAT_URL` | `decideHeartbeat()` returned `healthy` | ingestion stalled — externalised, so a broken Slack app can no longer hide it |
+| `dbOk` | any `/health` D1 read throws | dead or unmigrated database |
+| `checks.hourly` | the `0 * * * *` marker is older than 2 h | Worker deleted, broken deploy, cron trigger removed, account suspended |
+| `checks.quarterHourly` | the 15-minute marker is older than 45 min | the reconcile / render-poke / digest-send tick has stopped |
+| `checks.processing` | events arrived, are still `decision='logged'` past 45 min, inside a 24 h window | queue consumer **and** reconcile both failing |
+| `checks.feed` | no processed mention within the time-of-week threshold | ingestion stalled — the 2026-07 outage |
+| `checks.failures` | a failed event is older than the reconcile heal window | drift that will never self-heal |
 
-`runHeartbeat` resolving requires successful D1 reads (`latestMentionReceivedAt` and the ops-state
-read), so a resolved result *is* the liveness evidence. Neither ping is "the cron fired", which would
-stay green with the database dead.
+### The trade-off, and what pays for it
 
-**Be precise about what each one does not mean.** The hourly ping deliberately does **not** gate on
-`heal()`: the healer is a best-effort re-render, its failure is not a liveness failure, and gating on
-it would let a failed Slack update silence the liveness signal. And the ingest ping means a
-qualifying mention was **received** within `HEARTBEAT_MAX_SILENCE_HOURS` — that is mention *arrival*,
-not successful Slack *delivery*, so a feed that ingests fine while every post fails still reads
-healthy. Posting failures surface as `drift.errors`, not here.
+One monitor means one alarm, so the diagnosis moves out of the alert's *name* and into its *body*.
+Two things pay that back and both are load-bearing: every condition is a **separately visible
+boolean/number** in the JSON (read `checks` first when this goes red), and every predicate is a
+**pure function with unit tests** (`src/lib/health.ts`, `test/health.test.ts`) — because the risk of
+a single assertion point is a bug that silently narrows coverage with nothing testing it.
 
-The two hourly jobs run **concurrently** inside one `waitUntil`. They must not be awaited in
+### `null` is healthy; staleness is the signal
+
+A marker that has never been written, or an archive with nothing in it, reads **healthy**. Absence
+only occurs before the first tick after a fresh database, and failing there would 503 every
+deployment for up to 15 minutes — paging on a routine deploy. Only a marker that has gone *stale*
+is a fault.
+
+### Cron tick markers replaced the dead-man's-switch pings
+
+`ops_state` records `cron:last_hourly_at` and `cron:last_quarter_hourly_at` at the end of each
+`scheduled()` branch. Writing a marker proves D1 is **writable**, which is strictly stronger than
+the ping it replaced (a successful *read*), and it is asserted on every 180 s rather than once an
+hour. The two BetterStack heartbeats were therefore removed rather than kept alongside: they never
+pinged in their short life, and a never-pinged heartbeat sits in `pending`, which is
+indistinguishable from healthy and cannot alarm.
+
+The hourly marker is written only when `runHeartbeat` resolved — it cannot resolve without two
+successful D1 reads, so a resolved result *is* the liveness evidence. It deliberately does **not**
+gate on `heal()`: the healer is a best-effort re-render, its failure is not a liveness failure, and
+gating on it would let a failed Slack update silence the liveness signal. The quarter-hourly marker
+is written unconditionally at the end of its chain — every step already swallows its own failure, so
+reaching the end means the tick *ran*. It sits outside `reconcile()`, which early-returns when
+`POSTING_ENABLED` is not `"true"`: a deliberately paused feed must not read as a dead cron.
+
+The two hourly jobs still run **concurrently** inside one `waitUntil`. They must not be awaited in
 sequence: `runHeartbeat`'s alert path calls `slackFetch`, which has no timeout and honours an
-uncapped `Retry-After`, so a pending heartbeat would block the healer indefinitely — and a pending
-healer would block both pings even with ingestion healthy. Multiple registered `waitUntil` promises
-are all kept alive; the only real requirement is that a ping sits inside a *registered* promise,
-because an un-awaited fetch is cancelled the moment the handler returns.
+uncapped `Retry-After`, so a pending heartbeat would block the healer indefinitely.
 
-### Why the hourly branch is one `waitUntil`
+### The stall threshold is measured, and time-of-week aware
 
-It used to be two independent `ctx.waitUntil()` calls. A Worker may be torn down the moment its
-handler returns, which cancels an un-awaited fetch — so a ping added alongside them would have been
-killed, and the heartbeat would have read dead while the Worker was perfectly fine. The pings are
-now awaited inside the same keep-alive as the work they report on.
+`HEARTBEAT_MAX_SILENCE_HOURS` defaulted to 24 — an unmeasured guess that cost ~28 h to notice a
+stall. Measured over 2,618 processed mentions across 66 days of production D1 (2026-09-12): mean gap
+**0.6 h**; 25 gaps over 6 h; **every** gap of 10 h or more fell on a Sat/Sun; weekday maximum
+**8.8 h**; weekend maximum **20.3 h**; and exactly one gap over 24 h — the 26-hour outage itself.
+
+So the threshold is **16 h on a weekday, 24 h at the weekend** (`stallThresholdHours`, Melbourne
+local day): 7.2 h of headroom over the worst weekday gap on record, and weekday detection in ~16 h
+instead of ~28 h. Public holidays behave like weekdays — that is what the headroom is for.
+
+It is **one shared predicate**, used by `/health` and by the in-Worker Slack alert, so the two can
+never disagree about what "stalled" means. `HEARTBEAT_MAX_SILENCE_HOURS`, when set, still overrides
+both days with one flat value.
+
+### Two gauges, not one
+
+`latestMentionReceivedAt()` was misnamed: `source` is NULL at `append()` time and set only by
+`markProcessed()`, so it required successful **processing**, not arrival. A dead queue consumer was
+therefore indistinguishable from a silent upstream, and both took ~28 h to detect. `/health` now
+reports `lastReceivedAt` (unfiltered) alongside `lastProcessedAt` (renamed
+`latestProcessedMentionAt`). Recent received + stale processed is an unambiguous "our pipeline is
+broken", available in minutes, and it separates two faults with completely different responses.
+
+### Why `checks.processing` tolerates 45 minutes
+
+Reconcile re-processes *every* event in its 72 h window on each 15-minute tick, so a dead queue
+consumer alone is healed within a tick or two and costs only latency. An event still unprocessed
+after three reconcile cycles means the consumer **and** the reconcile are both failing. The 24 h
+window is what lets a genuinely poisoned event age out instead of pinning the monitor red forever.
 
 ### Still not covered
 
-- ~27 h to alarm on an ingestion stall, because `HEARTBEAT_MAX_SILENCE_HOURS` defaults to 24.
-  Measure the p99 inter-arrival gap of `webhook_events.received_at` and lower it.
-- The `*/15` reconcile tick has no heartbeat: it is self-healing and a missed tick is harmless, so
-  one would page for a benign skip. The failure that matters (reconcile wedged) shows up as
-  `drift.unposted` climbing, which nothing yet asserts on — a `driftOk` boolean on `/health` is the
-  right shape once the normal distribution is known.
-- Nothing monitors the monitor.
+- **Slack delivery is not asserted.** `checks.feed` proves mentions *arrive*, not that they are
+  posted. A feed ingesting normally while every Slack post fails reads healthy until those failures
+  age past the heal window and trip `checks.failures`.
+- **`headwater-ingest-dlq` has no consumer** and is referenced nowhere in the code. Messages failing
+  5 retries land there and stay; depth is unobservable. Reconcile's 72 h window means it is not the
+  only recovery path, and `checks.processing` catches the *consequence*, but not the queue itself.
+- **Queues, the Durable Object and Browser Rendering are unmonitored** beyond their effects.
+- **A wiped database reads healthy**, because empty gauges are treated as "no evidence yet".
+- **Nothing monitors the monitor.** Re-run the throwaway-heartbeat drill on a calendar rather than
+  assuming BetterStack is fine.

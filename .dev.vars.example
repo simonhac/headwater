@@ -31,8 +31,3 @@ ACCESS_AUD=your-application-audience-tag
 # Local dev ONLY — `wrangler dev` has no Access in front, so this opens /inspect + /api locally.
 # NEVER set it in prod (keep it out of wrangler.jsonc and `wrangler secret`).
 DEV_SKIP_ACCESS=true
-
-# External dead-man's switches (BetterStack). DELIBERATELY ABSENT LOCALLY — unset means off, so a
-# dev worktree can never keep production's monitors green. Set in prod with `wrangler secret put`:
-#   HW_HOURLY_HEARTBEAT_URL   pinged when the hourly tick completed AND D1 was readable
-#   HW_INGEST_HEARTBEAT_URL   pinged only when ingestion is actually flowing (decideHeartbeat healthy)

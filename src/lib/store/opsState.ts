@@ -16,6 +16,23 @@ export class OpsState {
     return Number.isFinite(n) ? n : null;
   }
 
+  /** Several numeric keys in one round trip — /health reads both cron markers on every poll and
+   *  should not pay a query each. Missing keys are simply absent from the map. */
+  async getNumbers(keys: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (keys.length === 0) return out;
+    const placeholders = keys.map(() => "?").join(", ");
+    const res = await this.db
+      .prepare(`SELECT key, value FROM ops_state WHERE key IN (${placeholders})`)
+      .bind(...keys)
+      .all<{ key: string; value: string }>();
+    for (const r of res.results ?? []) {
+      const n = Number(r.value);
+      if (Number.isFinite(n)) out.set(r.key, n);
+    }
+    return out;
+  }
+
   /** Upsert. `now` is the caller's clock (epoch ms), stored as updated_at. */
   async set(key: string, value: string, now: number): Promise<void> {
     await this.db

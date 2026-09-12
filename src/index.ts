@@ -24,15 +24,16 @@ import { withRetry } from "@/lib/retry";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
-import { runHeartbeat } from "@/lib/heartbeat";
+import { maxSilenceHours, runHeartbeat } from "@/lib/heartbeat";
+import { OpsState } from "@/lib/store/opsState";
 import { MEDIA_ICON_PNG } from "@/assets/mediaIcons";
 import { buildDigest, DIGEST_TZ } from "@/lib/digest";
+import { assessHealth, HOURLY_TICK_KEY, PROCESSING_STALE_MINUTES, PROCESSING_WINDOW_HOURS, QUARTER_HOURLY_TICK_KEY } from "@/lib/health";
 import { renderDigestEmail, renderDigestText } from "@/ui/email";
 import { runDigestSend } from "@/lib/digestSend";
 import { SubscriberStore } from "@/lib/store/subscribers";
 import { verifySlackSignature } from "@/lib/slack/verify";
 import { handleDigestCommand } from "@/lib/slack/commands";
-import { pingHeartbeatUrl } from "@/lib/pingHeartbeat";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -42,6 +43,20 @@ app.use("*", async (c, next) => {
   await next();
   c.header("Referrer-Policy", "no-referrer");
 });
+
+/**
+ * Record that a cron branch ran, for /health to assert freshness on. Best-effort: a failed marker
+ * write must never throw out of scheduled() (a rejected cron just retries noisily), and one missed
+ * write is covered by the threshold, which tolerates more than one interval.
+ */
+async function markCronTick(env: Env, key: string): Promise<void> {
+  const now = Date.now();
+  try {
+    await new OpsState(env.DB).set(key, String(now), now);
+  } catch (e) {
+    console.error(`[cron] marker ${key} failed: ${String(e)}`);
+  }
+}
 
 /** How far back /health's drift gauge looks (keeps the count bounded + actionable). */
 const DRIFT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -97,6 +112,7 @@ async function heal(env: Env): Promise<void> {
 
 // --- health / status (no secrets leaked). Root "/" falls through to 404. ---
 app.get("/health", async (c) => {
+  const now = Date.now();
   let count = 0;
   let subscribers = 0;
   // Drift gauge over the last DRIFT_WINDOW_MS: `errors` = failed/threw events, `unposted` =
@@ -107,12 +123,39 @@ app.get("/health", async (c) => {
   // This is what lets ONE keyword monitor cover both config breakage and a dead DB — BetterStack's
   // `keyword` type requires a 2xx *and* the keyword.
   let dbOk = true;
+  // Everything else this endpoint asserts on. /health is the SINGLE assertion point for headwater:
+  // the uptime monitor polls it every 180s, so failing closed here detects a fault ~20x faster than
+  // a 1h heartbeat could, which is why the dead-man's-switch pings were retired in its favour.
+  let health: ReturnType<typeof assessHealth> | null = null;
+  let gauges: { lastReceivedAt: number | null; lastProcessedAt: number | null } | null = null;
   try {
     const log = new EventLog(c.env.DB);
-    const row = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM webhook_events`).first<{ n: number }>();
-    count = row?.n ?? 0;
-    drift = await log.driftCounts(Date.now() - DRIFT_WINDOW_MS);
+    // One pass for the count + every freshness gauge. The windows are DERIVED from the constants
+    // that define them — a failure only counts as stuck once it is older than the window reconcile
+    // heals within, because recent drift is expected and asserting on it would false-alarm.
+    const g = await log.healthGauges({
+      unprocessedSinceMs: now - PROCESSING_WINDOW_HOURS * 60 * 60 * 1000,
+      unprocessedUntilMs: now - PROCESSING_STALE_MINUTES * 60 * 1000,
+      stuckSinceMs: now - DRIFT_WINDOW_MS,
+      stuckUntilMs: now - RECONCILE_LOOKBACK_MS,
+    });
+    count = g.events;
+    gauges = { lastReceivedAt: g.lastReceivedAt, lastProcessedAt: g.lastProcessedAt };
+    drift = await log.driftCounts(now - DRIFT_WINDOW_MS);
     subscribers = await new SubscriberStore(c.env.DB).count();
+    const ticks = await new OpsState(c.env.DB).getNumbers([HOURLY_TICK_KEY, QUARTER_HOURLY_TICK_KEY]);
+    health = assessHealth({
+      now,
+      // The same threshold the in-Worker Slack alert uses, so the two cannot disagree about what
+      // "stalled" means — and time-of-week aware, because the feed's weekend tail is real (20.3h
+      // observed) while its weekday tail is not (8.8h).
+      feedThresholdHours: maxSilenceHours(c.env, now),
+      gauges: {
+        ...g,
+        hourlyTickAt: ticks.get(HOURLY_TICK_KEY) ?? null,
+        quarterHourlyTickAt: ticks.get(QUARTER_HOURLY_TICK_KEY) ?? null,
+      },
+    });
   } catch (e) {
     dbOk = false;
     console.error(`[health] database unreadable: ${String(e)}`);
@@ -123,12 +166,17 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env, routing));
   return c.json({
     service: "headwater",
-    build: "headwater-36", // bump on each deploy to confirm the running code
+    build: "headwater-38", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     digestEnabled: c.env.DIGEST_ENABLED === "true",
     digestSubscribers: subscribers, // count only — addresses stay in D1
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
+    // Every fault, individually. One monitor means one alarm, so the diagnosis has to live in the
+    // body — read `checks` before anything else when this goes red.
+    checks: health?.checks ?? null,
+    lastReceivedAt: gauges?.lastReceivedAt ?? null, // arrival …
+    lastProcessedAt: gauges?.lastProcessedAt ?? null, // … vs processed: recent + stale = broken pipeline
     configOk: config.ok,
     configured: {
       webhookSecret: !!c.env.WEBHOOK_SHARED_SECRET,
@@ -142,7 +190,10 @@ app.get("/health", async (c) => {
     // How many distinct channels the feed fans out to (count only — ids are secret). 1 = default only.
     channels: configuredChannels(routing, c.env).length,
     dbOk,
-  }, dbOk ? 200 : 503);
+    // FAIL CLOSED. The keyword monitor requires a 2xx AND `"configOk":true`, so a 503 here is
+    // caught in ~6 minutes — and the body still carries the keyword, which is what keeps a failure
+    // legible rather than merely absent. Do not "simplify" this back to a 200 on faults.
+  }, dbOk && (health?.ok ?? true) ? 200 : 503);
 });
 
 // --- inbound Meltwater Generic Webhook ---
@@ -563,11 +614,8 @@ export default {
       // sequence, which quietly removed the failure isolation the two separate waitUntil calls had:
       // runHeartbeat's alert path calls slackFetch, which has no timeout and honours an uncapped
       // Retry-After, so a PENDING heartbeat would have blocked the healer indefinitely — and a
-      // pending healer would have blocked both pings even with ingestion healthy and D1 readable.
-      //
-      // (The reason given for collapsing them was wrong: multiple registered waitUntil promises are
-      // all kept alive. The real requirement is only that the ping sits inside a REGISTERED promise,
-      // because an un-awaited fetch is cancelled the moment the handler returns.)
+      // pending healer would have blocked the tick marker even with ingestion healthy and D1
+      // readable.
       ctx.waitUntil(
         (async () => {
           const [hbResult] = await Promise.allSettled([
@@ -579,22 +627,14 @@ export default {
           if (hbResult.status === "rejected") {
             console.error(`[heartbeat] failed: ${String(hbResult.reason)}`);
           }
-          const hb = hbResult.status === "fulfilled" ? hbResult.value : null;
-
-          // What this ping actually proves, stated precisely: the hourly handler ran AND
-          // runHeartbeat completed, which requires successful D1 reads (latestMentionReceivedAt and
-          // the ops-state read) — so it catches a dead Worker, a removed cron trigger, a broken
-          // deploy and a dead D1. It deliberately does NOT gate on heal(): the healer is a
-          // best-effort re-render whose failure is not a liveness failure, and gating on it would
-          // let a failed Slack update silence the liveness signal.
-          if (env.HW_HOURLY_HEARTBEAT_URL && hb) await pingHeartbeatUrl(env.HW_HOURLY_HEARTBEAT_URL);
-
-          // Narrower: a qualifying mention was RECEIVED within HEARTBEAT_MAX_SILENCE_HOURS (default
-          // 24). Note what that is not — it is mention ARRIVAL, not successful Slack delivery, so a
-          // feed that ingests fine while every post fails still reads healthy. It is the same
-          // verdict the in-Worker Slack alert uses, and externalising it means a broken Slack app
-          // can no longer hide a stall, which is the shape of the 2026-07 26-hour outage.
-          if (env.HW_INGEST_HEARTBEAT_URL && hb?.healthy) await pingHeartbeatUrl(env.HW_INGEST_HEARTBEAT_URL);
+          if (hbResult.status === "fulfilled") {
+            // The marker means "this tick ran and D1 was readable" — runHeartbeat cannot resolve
+            // without two successful reads, so a fulfilled result IS the liveness evidence, exactly
+            // what the retired hourly ping proved. It deliberately does NOT gate on heal() (a
+            // best-effort re-render; gating would let a failed Slack update silence liveness) nor on
+            // the heartbeat's verdict — a stalled feed is a separate check with its own threshold.
+            await markCronTick(env, HOURLY_TICK_KEY);
+          }
         })(),
       );
     } else {
@@ -620,7 +660,12 @@ export default {
               );
             }
           })
-          .catch((e) => console.error(`[digest] failed: ${String(e)}`)),
+          .catch((e) => console.error(`[digest] failed: ${String(e)}`))
+          // Last, and unconditionally — every step above already swallows its own failure, so
+          // reaching here means the tick RAN, which is the claim /health's staleness check makes.
+          // Deliberately outside reconcile(), which early-returns when POSTING_ENABLED isn't "true":
+          // a paused feed must not read as a dead cron.
+          .then(() => markCronTick(env, QUARTER_HOURLY_TICK_KEY)),
       );
     }
   },
