@@ -45,7 +45,9 @@ export interface Env {
   REPLAY_KEY?: string;
 
   // --- ingestion heartbeat (all optional; sensible defaults in src/lib/heartbeat.ts) ---
-  /** Alert if no webhook has arrived in this many hours (default 24). */
+  /** Escape hatch for the stall threshold: when set it overrides BOTH days with this one flat
+   *  value. Unset (the normal case) means the measured time-of-week default — 16h on a weekday,
+   *  24h at the weekend (src/lib/heartbeat.ts). */
   HEARTBEAT_MAX_SILENCE_HOURS?: string;
   /** While a stall persists, re-alert at most once per this many hours (default 6). */
   HEARTBEAT_REALERT_HOURS?: string;

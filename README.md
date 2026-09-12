@@ -14,7 +14,7 @@ disabled), and posts it — replacing Meltwater's noisy built-in Slack feed.
 - **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (exact dedupe), `stories` (one row per story = one Slack message: `slack_ts` + `channel`, outlet list, `simhash`/`media_type` for broadcast near-dup, `render_hash` for the redecode backfill), `broadcast_stations` + `station_names` (radio/TV station resolution), `ops_state` (heartbeat bookkeeping)
 - **Cloudflare resources (all required to bring the system up):** **Workers** (the app + `scheduled()` cron triggers), **D1** (all persistence above), **Queues** (`INGEST_QUEUE` — the webhook enqueues each event id; the `queue()` consumer drains it one-at-a-time so ingestion is serial and the near-dup lookup never races — **needs the Workers Paid plan**), a **Durable Object** (`STATION_RENDERER` — the single serial station-render drainer; SQLite-backed, free-plan-ok), **Browser Rendering** (the `browser` binding — headless Chromium, used *only* for first-time station-name resolution; a few seconds per new station, well within the free 10 min/day), and **Cloudflare Access** (Zero Trust — gates `/inspect`+`/api`; see [Access & security model](#access--security-model)). Provisioning for each is in [Deploy to Cloudflare](#deploy-to-cloudflare).
 - **Inspect:** `GET /inspect` (Cloudflare Access) — recent events, raw payload, filter decision + reason, Block Kit preview
-- **Monitoring:** `GET /health` validates the runtime config (`configOk`); an hourly cron **heartbeat** alerts Slack if ingestion goes quiet (`src/lib/heartbeat.ts`)
+- **Monitoring:** `GET /health` is the single assertion point — it validates the runtime config (`configOk`) and **fails closed (503)** on a dead database, a stopped cron, an unprocessed backlog, a stalled feed or unhealable drift, each a separate boolean in `checks` (`src/lib/health.ts`); an hourly cron **heartbeat** also alerts Slack if ingestion goes quiet (`src/lib/heartbeat.ts`)
 
 Deferred (not built): RSS-poll fallback and the native REST API path. Print is excluded (no plan credit).
 
@@ -23,7 +23,7 @@ Auth model (all fail-closed except the two public routes) — see [Access & secu
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `GET /health` | none (public) | health/status JSON (no secrets); a `drift` gauge (`errors`, `unposted`) + `configOk` boolean; `/` returns 404 |
+| `GET /health` | none (public) | health/status JSON (no secrets): per-fault `checks`, a `drift` gauge (`errors`, `unposted`), `configOk`; **503 when any check fails**; `/` returns 404 |
 | `POST /webhooks/meltwater/:token` | path token = `WEBHOOK_SHARED_SECRET` | receive a Meltwater alert (archive write retries; returns 5xx if it can't persist) |
 | `GET /inspect` | **Cloudflare Access** (login) | inspection UI (`?filter=failed` shows only errored/undelivered events) |
 | `GET /api/webhooks/recent` | **Cloudflare Access** | recent events as JSON |
@@ -225,7 +225,7 @@ It reports names and reasons only, never values.
 
 | Name | Kind | Default | Purpose |
 |---|---|---|---|
-| `HEARTBEAT_MAX_SILENCE_HOURS` | var | `24` | Alert if no mention has arrived in this many hours |
+| `HEARTBEAT_MAX_SILENCE_HOURS` | var | *16 weekday / 24 weekend* | Stall threshold. Unset = the measured time-of-week default; setting it overrides both days with one flat value |
 | `HEARTBEAT_REALERT_HOURS` | var | `6` | While a stall persists, re-alert at most this often |
 | `SLACK_ALERT_CHANNEL` | var | `SLACK_DEFAULT_CHANNEL` | Channel for heartbeat alerts |
 
@@ -442,13 +442,26 @@ with **no error** — deliveries are rejected before they're ever logged.
   `#name`, and `POSTING_ENABLED` being exactly `"true"`/`"false"`. It never leaks values — only the
   `configOk` boolean is exposed. (This catches *malformed* config, not a well-formed-but-wrong value —
   that's what the heartbeat is for.)
+- **Failing closed** — `/health` returns **503** when any check in its `checks` object fails: the
+  database is unreadable, either cron has stopped ticking (`ops_state` markers, 2 h / 45 min), events
+  arrived but never processed, the feed has gone quiet, or a failure is older than the window
+  reconcile could heal it in. An external uptime check that requires a 2xx therefore covers all of
+  them; the body keeps its full shape (including `configOk`) so a keyword assertion stays meaningful.
+  Read `checks` first when it goes red — one alarm means the diagnosis lives in the body. Predicates
+  are pure and unit-tested (`src/lib/health.ts`); `null` (a marker never written, an empty archive)
+  reads healthy, because only *staleness* is a signal.
 - **Ingestion heartbeat** — an hourly cron (`triggers.crons` in `wrangler.jsonc` → `scheduled()` in
   `src/index.ts` → `src/lib/heartbeat.ts`) checks the newest `webhook_events` row **that parsed
   into a real mention** (so empty-body probes / health pings can't mask a stall) and posts a Slack
-  alert if nothing has arrived within `HEARTBEAT_MAX_SILENCE_HOURS` (default 24). It de-dupes via the
-  `ops_state` table so a persistent stall pages at most once per `HEARTBEAT_REALERT_HOURS`
-  (default 6) and re-arms once ingestion recovers. Trigger it on demand at `GET /admin/heartbeat`
-  with `Authorization: Bearer <REPLAY_KEY>`.
+  alert if nothing has arrived within the stall threshold. It de-dupes via the `ops_state` table so a
+  persistent stall pages at most once per `HEARTBEAT_REALERT_HOURS` (default 6) and re-arms once
+  ingestion recovers. Trigger it on demand at `GET /admin/heartbeat` with
+  `Authorization: Bearer <REPLAY_KEY>`.
+  - **The threshold is time-of-week aware: 16 h on a weekday, 24 h at the weekend** (Melbourne local
+    day), and it is the *same* predicate `/health` asserts on, so the two can never disagree.
+    Measured over 2,618 mentions across 66 days: every gap of 10 h or more fell on a Sat/Sun, the
+    weekday maximum was 8.8 h and the weekend maximum 20.3 h. Setting
+    `HEARTBEAT_MAX_SILENCE_HOURS` overrides both days with one flat value.
   - Optional tunables (non-secret — set in `wrangler.jsonc` `vars`, or as secrets):
     `HEARTBEAT_MAX_SILENCE_HOURS`, `HEARTBEAT_REALERT_HOURS`, and `SLACK_ALERT_CHANNEL`
     (the alert channel; defaults to `SLACK_DEFAULT_CHANNEL`).

@@ -1,4 +1,5 @@
 import type { Env } from "@/env";
+import { DIGEST_TZ } from "@/lib/digest";
 import { EventLog } from "@/lib/store/eventLog";
 import { OpsState } from "@/lib/store/opsState";
 import { postText } from "@/lib/slack/post";
@@ -8,8 +9,39 @@ const HOUR_MS = 60 * 60 * 1000;
 /** ops_state key holding the epoch-ms of the last stall alert we posted (for re-alert throttling). */
 export const LAST_ALERT_KEY = "heartbeat:last_stall_alert_at";
 
-const DEFAULT_MAX_SILENCE_HOURS = 24;
+/**
+ * How long a quiet feed is tolerated, by LOCAL day of week — the single definition of "stalled",
+ * shared by the Slack alert and `/health` so the two can never drift apart.
+ *
+ * Measured, not guessed (2,618 processed mentions over 66 days of production D1, 2026-09-12):
+ * mean gap 0.6h; 25 gaps over 6h; every gap of 10h or more fell on a Sat/Sun; weekday maximum
+ * 8.8h; weekend maximum 20.3h; and exactly one gap over 24h — the 26-hour outage itself. So a flat
+ * 24h sat only ~3.7h above ordinary weekend quiet while costing ~28h to notice a real stall.
+ *
+ * 16h on a weekday leaves 7.2h of headroom over the worst weekday gap on record and detects a
+ * weekday stall in ~16h; the weekend keeps 24h because the observed tail genuinely reaches 20h.
+ * Public holidays behave like weekdays here — that is what the headroom is for.
+ */
+export const WEEKDAY_MAX_SILENCE_HOURS = 16;
+export const WEEKEND_MAX_SILENCE_HOURS = 24;
 const DEFAULT_REALERT_HOURS = 6;
+
+/** The feed is Australian media, so "weekend" means a Melbourne weekend, not a UTC one. Same zone
+ *  as the digest (DIGEST_TZ) — deliberately one string, because two copies drift. */
+export const FEED_TZ = DIGEST_TZ;
+
+/** Pure: the silence threshold that applies at `now`, chosen by local day of week. */
+export function stallThresholdHours(now: number, timeZone: string = FEED_TZ): number {
+  const day = new Intl.DateTimeFormat("en-AU", { timeZone, weekday: "short" }).format(new Date(now));
+  return day === "Sat" || day === "Sun" ? WEEKEND_MAX_SILENCE_HOURS : WEEKDAY_MAX_SILENCE_HOURS;
+}
+
+/** The threshold in force, honouring the HEARTBEAT_MAX_SILENCE_HOURS escape hatch: when set it
+ *  overrides BOTH days with one flat value (that is how the integration tests pin it to 3h). */
+export function maxSilenceHours(env: Env, now: number): number {
+  const override = Number(env.HEARTBEAT_MAX_SILENCE_HOURS);
+  return Number.isFinite(override) && override > 0 ? override : stallThresholdHours(now);
+}
 
 /** Pure decision: given the latest receipt time and last-alert marker, is ingestion healthy and
  * should we alert now? Separated from IO so it can be unit-tested without D1/Slack. */
@@ -60,11 +92,11 @@ function numEnv(v: string | undefined, dflt: number): number {
  * the next stall alerts promptly. `now` (epoch ms) is injected for testability.
  */
 export async function runHeartbeat(env: Env, now: number): Promise<HeartbeatResult> {
-  const thresholdHours = numEnv(env.HEARTBEAT_MAX_SILENCE_HOURS, DEFAULT_MAX_SILENCE_HOURS);
+  const thresholdHours = maxSilenceHours(env, now);
   const reAlertHours = numEnv(env.HEARTBEAT_REALERT_HOURS, DEFAULT_REALERT_HOURS);
   const ops = new OpsState(env.DB);
 
-  const latest = await new EventLog(env.DB).latestMentionReceivedAt();
+  const latest = await new EventLog(env.DB).latestProcessedMentionAt();
   const lastAlertAt = await ops.getNumber(LAST_ALERT_KEY);
   const d = decideHeartbeat({ latest, now, thresholdHours, reAlertHours, lastAlertAt });
   const base: HeartbeatResult = { ...d, latestMentionAt: latest, thresholdHours, alerted: false };
